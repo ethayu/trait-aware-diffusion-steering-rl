@@ -1,0 +1,38 @@
+git clone --recurse-submodules git@github.com:ethayu/diffusion-trait-steering.git
+cd dsrl
+
+conda create -n dsrl python=3.9 -y
+conda activate dsrl
+
+cd dppo
+pip install -e .
+pip install -e .[gym]
+pip install -e .[robomimic]
+cd ..
+
+cd stable-baselines3
+pip install -e .
+cd ..
+
+next download mujoco (its going to expect mujoco to be in your home dir)
+mkdir -p ~/.mujoco
+cd ~/.mujoco
+wget https://mujoco.org/download/mujoco210-linux-x86_64.tar.gz
+tar -xzf mujoco210-linux-x86_64.tar.gz
+
+if you do it right you should see this after the command ls ~/.mujoco/mujoco210
+bin  include  model  sample  THIRD_PARTY_NOTICES
+
+then in the conda env,
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$HOME/.mujoco/mujoco210/bin
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/lib/nvidia
+
+and fix numpy version:
+pip install "numpy<2.0"
+
+I put the pretrained hopper checkpoint here: 
+projects/diffusion-trait-steering/dppo/log/gym-pretrain/hopper-medium-v2_pre_diffusion_mlp_ta4_td20/2024-06-12_23-10-05/checkpoint/state_3000.pt
+
+after verifying the checkpoint is there,
+you should be able to run
+python train.py --config-path configs/train/train_dpo_humanoid_walk.py --exp-name humanoid_walk_dpo
