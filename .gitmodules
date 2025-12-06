@@ -1,6 +1,7 @@
 [submodule "stable-baselines3"]
 	path = stable-baselines3
-	url = git@github.com:ajwagen/stable-baselines3-dsrl.git
+	url = https://github.com/aneeshe27/stable-baselines3-dsrl.git
 [submodule "dppo"]
 	path = dppo
-	url = git@github.com:ajwagen/dppo-dsrl.git
+	url = https://github.com/aneeshe27/dppo-dsrl.git
+
