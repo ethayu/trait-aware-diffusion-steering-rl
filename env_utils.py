@@ -85,8 +85,9 @@ class ObservationWrapperRobomimic(gym.Env):
 		obs = raw_obs['state'].flatten()
 		return obs, reward, done, info
 
-	def render(self, **kwargs):
-		return self.env.render()
+	def render(self, mode="human", **kwargs):
+		# Delegate rendering to the underlying environment, allowing rgb_array for video capture
+		return self.env.render(mode=mode, **kwargs)
 	
 
 class ObservationWrapperGym(gym.Env):
@@ -125,8 +126,9 @@ class ObservationWrapperGym(gym.Env):
 		obs = self.normalize_obs(raw_obs)
 		return obs, reward, done, info
 
-	def render(self, **kwargs):
-		return self.env.render()
+	def render(self, mode="human", **kwargs):
+		# Delegate rendering to the underlying environment, allowing rgb_array for video capture
+		return self.env.render(mode=mode, **kwargs)
 	
 	def normalize_obs(self, obs):
 		return 2 * ((obs - self.obs_min) / (self.obs_max - self.obs_min + 1e-6) - 0.5)
@@ -183,8 +185,9 @@ class ActionChunkWrapper(gymnasium.Env):
 			info['terminal_observation'] = obs
 		return obs, reward, done, False, info
 
-	def render(self):
-		return self.env.render()
+	def render(self, mode="human", **kwargs):
+		# Delegate rendering to the underlying environment, allowing rgb_array for video capture
+		return self.env.render(mode=mode, **kwargs)
 	
 	def close(self):
 		return

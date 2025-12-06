@@ -24,9 +24,14 @@ act_steps: 4
 load_offline_data: False
 deterministic_eval: False 
 
+# Extra fields used only by the rollout-recording script
+model_path: ""
+record_episodes: 10
+
 eval_interval: 4000
 num_evals: 200
-save_model_interval: 10000
+#save_model_interval: 10000
+save_model_interval: 250  # checkpoint every ~250 env steps (~1000 timesteps with 4 envs)
 save_replay_buffer: False
 
 env:
