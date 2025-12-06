@@ -1,3 +1,7 @@
+import os
+import csv
+from typing import Optional
+
 import torch
 import wandb
 import numpy as np
@@ -8,8 +12,17 @@ import hydra
 class DPPOBasePolicyWrapper:
 	def __init__(self, base_policy):
 		self.base_policy = base_policy
+		# xpose the underlying diffusion model's observation dimension so that
+		# downstream algorithms (e.g., DSRL) can slice extended observations
+		# back to the base state dim before calling the diffusion policy.
+		if hasattr(base_policy, "obs_dim"):
+			self.obs_dim = base_policy.obs_dim
 		
 	def __call__(self, obs, initial_noise, return_numpy=True):
+		# if the env observation has been extended (e.g., with preferences),
+		# slice back to the base diffusion model's obs_dim before calling it.
+		if hasattr(self, "obs_dim"):
+			obs = obs[..., : self.obs_dim]
 		cond = {
 			"state": obs,
 			"noise_action": initial_noise,
@@ -43,6 +56,7 @@ class LoggingCallback(BaseCallback):
 		algorithm='dsrl_sac',
 		max_steps=-1,
 		deterministic_eval=False,
+		log_dir: Optional[str] = None,
 	):
 		super().__init__(verbose)
 		self.action_chunk = action_chunk
@@ -64,12 +78,60 @@ class LoggingCallback(BaseCallback):
 		self.algorithm = algorithm
 		self.max_steps = max_steps
 		self.deterministic_eval = deterministic_eval
+		self.log_dir = log_dir
+		self.local_log_path = None
+		if self.log_dir is not None:
+			os.makedirs(self.log_dir, exist_ok=True)
+			self.local_log_path = os.path.join(self.log_dir, "preference_metrics.csv")
+			if not os.path.exists(self.local_log_path):
+				with open(self.local_log_path, mode="w", newline="") as f:
+					writer = csv.writer(f)
+					writer.writerow([
+						"step",
+						"timesteps",
+						"ep_len_mean",
+						"ep_rew_mean",
+						"base_rew_mean_step",
+						"shaped_rew_mean_step",
+						"foot_angle_dev_mean_step",
+						"foot_angle_raw_mean_step",
+						"foot_angle_reset_mean_step",
+						"p0_mean_step",
+						"p1_mean_step",
+					])
 
 	def _on_step(self):
+		# per-step / per-env logging
 		for info in self.locals['infos']:
 			if 'episode' in info:
 				self.episode_rewards.append(info['episode']['r'])
 				self.episode_lengths.append(info['episode']['l'])
+		base_rewards = []
+		shaped_rewards = []
+		foot_devs = []
+		foot_angles = []
+		foot_reset_angles = []
+		p0_vals = []
+		p1_vals = []
+		for info in self.locals['infos']:
+			if isinstance(info, dict):
+				if 'base_reward' in info:
+					base_rewards.append(info['base_reward'])
+				if 'shaped_reward' in info:
+					shaped_rewards.append(info['shaped_reward'])
+				if 'foot_angle_dev' in info:
+					foot_devs.append(info['foot_angle_dev'])
+				if 'foot_angle_raw' in info:
+					foot_angles.append(info['foot_angle_raw'])
+				if 'foot_angle_reset' in info:
+					foot_reset_angles.append(info['foot_angle_reset'])
+				if 'pref' in info and info['pref'] is not None:
+					p = info['pref']
+					if len(p) > 0:
+						p0_vals.append(p[0])
+					if len(p) > 1:
+						p1_vals.append(p[1])
+
 		rew = self.locals['rewards']
 		self.total_reward += np.mean(rew)
 		self.episode_success[rew > -self.rew_offset] = 1
@@ -79,7 +141,7 @@ class LoggingCallback(BaseCallback):
 			if len(self.episode_rewards) > 0:
 				if self.use_wandb:
 					self.log_count += 1
-					wandb.log({
+					log_payload = {
 						"train/ep_len_mean": np.mean(self.episode_lengths),
 						"train/success_rate": np.sum(self.episode_success) / np.sum(self.episode_completed),
 						"train/ep_rew_mean": np.mean(self.episode_rewards),
@@ -89,7 +151,23 @@ class LoggingCallback(BaseCallback):
 						"train/actor_loss": self.locals['self'].logger.name_to_value['train/actor_loss'],
 						"train/critic_loss": self.locals['self'].logger.name_to_value['train/critic_loss'],
 						"train/ent_coef_loss": self.locals['self'].logger.name_to_value['train/ent_coef_loss'],
-					}, step=self.log_count)
+					}
+					if len(base_rewards) > 0:
+						log_payload["train/base_rew_mean_step"] = float(np.mean(base_rewards))
+					if len(shaped_rewards) > 0:
+						log_payload["train/shaped_rew_mean_step"] = float(np.mean(shaped_rewards))
+					if len(foot_devs) > 0:
+						log_payload["train/foot_angle_dev_mean_step"] = float(np.mean(foot_devs))
+					if len(foot_angles) > 0:
+						log_payload["train/foot_angle_raw_mean_step"] = float(np.mean(foot_angles))
+					if len(foot_reset_angles) > 0:
+						log_payload["train/foot_angle_reset_mean_step"] = float(np.mean(foot_reset_angles))
+					if len(p0_vals) > 0:
+						log_payload["train/p0_mean_step"] = float(np.mean(p0_vals))
+					if len(p1_vals) > 0:
+						log_payload["train/p1_mean_step"] = float(np.mean(p1_vals))
+
+					wandb.log(log_payload, step=self.log_count)
 					if np.sum(self.episode_completed) > 0:
 						wandb.log({
 							"train/success_rate": np.sum(self.episode_success) / np.sum(self.episode_completed),
@@ -98,6 +176,22 @@ class LoggingCallback(BaseCallback):
 						wandb.log({
 							"train/noise_critic_loss": self.locals['self'].logger.name_to_value['train/noise_critic_loss'],
 						}, step=self.log_count)
+				if self.local_log_path is not None:
+					with open(self.local_log_path, mode="a", newline="") as f:
+						writer = csv.writer(f)
+						writer.writerow([
+							self.log_count,
+							self.total_timesteps,
+							float(np.mean(self.episode_lengths)),
+							float(np.mean(self.episode_rewards)),
+							float(np.mean(base_rewards)) if len(base_rewards) > 0 else "",
+							float(np.mean(shaped_rewards)) if len(shaped_rewards) > 0 else "",
+							float(np.mean(foot_devs)) if len(foot_devs) > 0 else "",
+							float(np.mean(foot_angles)) if len(foot_angles) > 0 else "",
+							float(np.mean(foot_reset_angles)) if len(foot_reset_angles) > 0 else "",
+							float(np.mean(p0_vals)) if len(p0_vals) > 0 else "",
+							float(np.mean(p1_vals)) if len(p1_vals) > 0 else "",
+						])
 				self.episode_rewards = []
 				self.episode_lengths = []
 				self.total_reward = 0

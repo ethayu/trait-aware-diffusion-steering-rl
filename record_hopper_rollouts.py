@@ -17,9 +17,11 @@ from stable_baselines3.common.vec_env import DummyVecEnv
 from env_utils import (
     ObservationWrapperGym,
     ObservationWrapperRobomimic,
+    PreferenceWrapperGym,
     ActionChunkWrapper,
     make_robomimic_env,
 )
+from utils import load_base_policy
 
 
 # here register same OmegaConf resolvers as in train_dsrl.py so that ${eval:...}
@@ -34,10 +36,32 @@ base_path = os.path.dirname(os.path.abspath(__file__))
 def make_single_env(cfg):
     """
     Create a single environment with the same wrappers as used during training.
+    This mirrors `make_env` in `train_dsrl.py` so that the loaded checkpoint's
+    observation_space matches the eval env (including preferences).
     """
     if cfg.env_name in ["halfcheetah-medium-v2", "hopper-medium-v2", "walker2d-medium-v2"]:
         env = gym.make(cfg.env_name)
         env = ObservationWrapperGym(env, cfg.normalization_path)
+
+        # If a preference dimension is configured, append the same preference
+        # wrapper used during training so obs dim matches the checkpoint.
+        if hasattr(cfg, "pref_dim") and cfg.pref_dim > 0:
+            p_min = getattr(cfg, "pref_p_min", -1.0)
+            p_max = getattr(cfg, "pref_p_max", 1.0)
+            joint_index = getattr(cfg, "pref_joint_index", 4)
+            neutral_angle = getattr(cfg, "pref_neutral_angle", 0.0)
+            lambda_joint = getattr(cfg, "pref_lambda_joint", 1.0)
+            fixed_pref = getattr(cfg, "pref_fixed_p", None)
+            env = PreferenceWrapperGym(
+                env,
+                pref_dim=cfg.pref_dim,
+                p_min=p_min,
+                p_max=p_max,
+                joint_index=joint_index,
+                neutral_angle=neutral_angle,
+                lambda_joint=lambda_joint,
+                fixed_pref=fixed_pref,
+            )
     elif cfg.env_name in ["lift", "can", "square", "transport"]:
         env = make_robomimic_env(
             env=cfg.env_name,
@@ -131,9 +155,9 @@ def record_episodes(
 def main(cfg: OmegaConf):
     """
     run like this
-        python record_hopper_rollouts.py \\
-            model_path=/absolute/path/to/checkpoint_or_final.zip \\
-            record_episodes=10
+        python record_hopper_rollouts.py \
+            model_path= /home/aneeshe/projects/diffusion-trait-steering/logs/gym-dsrl/gym_hopper_dsrl_2025-12-06_05-48-52_1/2025-12-06_05-48-52_1/checkpoint/ft_policy_9000_steps.zip\
+            record_episodes=4
 
     this will save MP4s for episodes 0,1 and 8,9 into a `videos/` folder inside
     the current Hydra run directory.
@@ -149,6 +173,10 @@ def main(cfg: OmegaConf):
 
     vec_env = DummyVecEnv([lambda: make_single_env(cfg)])
 
+    # Re-instantiate the diffusion base policy just like in training, so we
+    # can reattach it to the loaded DSRL model if it fails to deserialize.
+    base_policy = load_base_policy(cfg)
+
     algo = cfg.algorithm
     if algo == "dsrl_sac":
         ModelCls = SAC
@@ -158,6 +186,7 @@ def main(cfg: OmegaConf):
         raise ValueError(f"Unsupported algorithm: {algo}")
 
     model_path = cfg.get("model_path", "")
+    model_path = "/home/aneeshe/projects/diffusion-trait-steering/logs/gym-dsrl/gym_hopper_dsrl_2025-12-06_07-53-46_1/2025-12-06_07-53-46_1/checkpoint/ft_policy_10000_steps.zip"
     if not model_path:
         raise ValueError(
             "You must pass a trained checkpoint path via CLI, e.g. "
@@ -182,10 +211,19 @@ def main(cfg: OmegaConf):
             critic_backup_combine_type=cfg.train.critic_backup_combine_type,
         )
 
-    model = ModelCls.load(model_path, env=vec_env, **load_kwargs)
+    # Load the model on the same device as training (e.g., cuda:0) so that
+    # the DSRL agent and diffusion base policy live on the same device.
+    load_device = getattr(cfg, "device", "auto")
+    model = ModelCls.load(model_path, env=vec_env, device=load_device, **load_kwargs)
+
+    # In some checkpoints, `diffusion_policy` cannot be deserialized and ends
+    # up as None. In that case, reattach the freshly instantiated base policy
+    # so `predict_diffused` works correctly.
+    if algo == "dsrl_na" and getattr(model, "diffusion_policy", None) is None:
+        model.diffusion_policy = base_policy
 
     # where to place videos: by default inside the current Hydra run dir
-    output_dir = os.path.join(os.getcwd(), "videos")
+    output_dir = os.path.join(os.getcwd(), "videos10000steps")
     total_episodes = int(cfg.get("record_episodes", 10))
 
     record_episodes(
@@ -200,5 +238,3 @@ def main(cfg: OmegaConf):
 
 if __name__ == "__main__":
     main()
-
-
