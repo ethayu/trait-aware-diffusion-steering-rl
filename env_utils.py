@@ -13,65 +13,21 @@ import json
 from dppo.env.gym_utils.wrapper import wrapper_dict
 import robomimic.utils.env_utils as EnvUtils
 import robomimic.utils.obs_utils as ObsUtils
+from traits import get_trait_reward_fn
 
 
-def compute_joint_pref_reward(
-	base_reward: float,
-	joint_angle: float,
-	p: np.ndarray,
-	neutral_angle: float = 0.0,
-	lambda_joint: float = 1.0,
-) -> float:
+def denormalize_obs(
+	norm_obs: np.ndarray,
+	obs_min: np.ndarray,
+	obs_max: np.ndarray,
+) -> np.ndarray:
 	"""
-	compute a preference-shaped reward based on a single joint angle.
-
-	args:
-		base_reward: Original environment reward (scalar).
-		joint_angle: Joint angle in physical units (e.g. radians).
-		p: Preference vector; we currently use the first two dims:
-		   p[0]: weight for "default" behavior (base reward),
-		   p[1]: weight for "joint constraint" preference.
-		   We internally normalize p[:2] so w0 + w1 ~= 1.
-		neutral_angle: Desired / neutral joint angle in the same units as joint_angle
-			(e.g. radians for Hopper's foot joint).
-		lambda_joint: Scale factor for the joint-angle penalty term.
+	Map normalized obs values back to raw values.
 	"""
-	# p should be a 1D numpy array
-	if isinstance(p, (list, tuple)):
-		p = np.asarray(p, dtype=np.float32)
-	if p.ndim > 1:
-		p = p.reshape(-1)
-
-	if p.shape[0] < 2:
-		return float(base_reward)
-
-	# use only first two dims for now, but keep p as a vector for future extensions. 
-	# because theoretically you could set p1 = 1 - p0 and get the same effect.
-	w_base = float(p[0])
-	w_joint = float(p[1])
-	total = w_base + w_joint
-	if total > 0.0:
-		w_base /= total
-		w_joint /= total
-	else:
-		w_base, w_joint = 1.0, 0.0
-
-	# Joint penalty: prefer angles close to neutral_angle.
-	# squared penalty so large deviations are punished more strongly.
-	joint_angle = float(joint_angle)
-	delta = joint_angle - float(neutral_angle)
-	joint_penalty = -(delta ** 2)
-
-	base_reward = float(base_reward)
-	# Two "reward components":
-	# - r_base: original env reward
-	# - r_joint: env reward plus a joint-angle penalty term
-	r_base = base_reward
-	r_joint = base_reward + lambda_joint * joint_penalty
-
-	# final reward is a normalized mixture
-	shaped_reward = w_base * r_base + w_joint * r_joint
-	return shaped_reward
+	if obs_min is None or obs_max is None:
+		return np.asarray(norm_obs, dtype=np.float32)
+	raw_obs = ((norm_obs / 2.0) + 0.5) * (obs_max - obs_min + 1e-6) + obs_min
+	return np.asarray(raw_obs, dtype=np.float32)
 
 
 def make_robomimic_env(render=False, env='square', normalization_path=None, low_dim_keys=None, dppo_path=None):
@@ -193,57 +149,90 @@ class ObservationWrapperGym(gym.Env):
 	def unnormalize_action(self, action):
 		action = (action + 1) / 2
 		return action * (self.action_max - self.action_min) + self.action_min
+	
 
-
-class PreferenceWrapperGym(gym.Env):
+class TraitWrapperGym(gym.Env):
 	"""
-	Append a preference vector p to the normalized observation and optionally
-	apply preference-shaped reward using a joint angle (e.g., Hopper foot joint).
-
-	This keeps the underlying env (e.g., Hopper-v2 with ObservationWrapperGym) unchanged,
-	but exposes an extended observation [state; p] to downstream wrappers / agents.
+	Append trait values and a binary trait mask to the observation, and apply
+	trait-aware reward shaping: r = r_old + sum_i mask_i * lambda_i * r_i(...).
 	"""
 
-	def __init__(
-		self,
-		env,
-		pref_dim: int = 2,
-		p_min: float = -1.0,
-		p_max: float = 1.0,
-		joint_index: int = 4,
-		neutral_angle: float = 0.0,
-		lambda_joint: float = 1.0,
-		fixed_pref=None,
-	):
+	def __init__(self, env, traits_cfg):
 		self.env = env
-		self.pref_dim = pref_dim
-		self.p_min = p_min
-		self.p_max = p_max
-		self.joint_index = joint_index
-		self.neutral_angle = neutral_angle
-		self.lambda_joint = lambda_joint
-		self.fixed_pref = None
-		if fixed_pref is not None:
-			fixed_pref = np.asarray(fixed_pref, dtype=np.float32).reshape(-1)
-			assert fixed_pref.shape[0] == self.pref_dim, f"Expected fixed_pref of dim {self.pref_dim}, got {fixed_pref.shape[0]}"
-			self.fixed_pref = fixed_pref
 		self.action_space = env.action_space
-		# if the wrapped env is an ObservationWrapperGym, we can access the
-		# normalization stats to recover the raw joint angle from the normalized one.
 		self.obs_min = getattr(env, "obs_min", None)
 		self.obs_max = getattr(env, "obs_max", None)
-		self.reset_joint_angle = None
 
-		# extend the observation space by pref_dim dimensions for p.
+		if OmegaConf.is_config(traits_cfg):
+			traits_cfg = OmegaConf.to_container(traits_cfg, resolve=True)
+		self.traits_cfg = traits_cfg or {}
+		self.trait_defs = list(self.traits_cfg.get("defs", []))
+		self.n_traits = len(self.trait_defs)
+		self.trait_dims = []
+		self.trait_value_mins = []
+		self.trait_value_maxs = []
+		for trait_def in self.trait_defs:
+			dim, v_min, v_max = self._trait_bounds_for_def(trait_def)
+			self.trait_dims.append(dim)
+			self.trait_value_mins.append(v_min)
+			self.trait_value_maxs.append(v_max)
+		self.total_trait_dim = int(sum(self.trait_dims))
+		self.mask_mode = self.traits_cfg.get("mask_mode", "all_on")
+		self.resample_on_reset = bool(self.traits_cfg.get("resample_on_reset", True))
+
+		self.fixed_values = self.traits_cfg.get("fixed_values", None)
+		self.fixed_mask = self.traits_cfg.get("fixed_mask", None)
+		self.override_values = None
+		self.override_mask = None
+		self.current_traits = None
+		self.current_mask = None
+		self.prev_raw_obs = None
+
+		self.trait_slices = []
+		start = 0
+		for dim in self.trait_dims:
+			self.trait_slices.append((start, start + dim))
+			start += dim
+		self.reward_fns = []
+		for trait_def in self.trait_defs:
+			trait_name = trait_def.get("name", None)
+			if trait_name is None:
+				raise ValueError("Each trait must define name.")
+			self.reward_fns.append(get_trait_reward_fn(trait_name))
+
 		env_low = env.observation_space.low
 		env_high = env.observation_space.high
-		p_low = np.full(pref_dim, p_min, dtype=np.float32)
-		p_high = np.full(pref_dim, p_max, dtype=np.float32)
-		low = np.concatenate([env_low, p_low], axis=0)
-		high = np.concatenate([env_high, p_high], axis=0)
+		trait_low, trait_high = self._trait_value_bounds()
+		mask_low = np.zeros(self.n_traits, dtype=np.float32)
+		mask_high = np.ones(self.n_traits, dtype=np.float32)
+		low = np.concatenate([env_low, trait_low, mask_low], axis=0)
+		high = np.concatenate([env_high, trait_high, mask_high], axis=0)
 		self.observation_space = spaces.Box(low=low, high=high, dtype=np.float32)
 
-		self.current_pref = None
+	def _trait_bounds_for_def(self, trait_def):
+		v_min = trait_def.get("value_min", -1.0)
+		v_max = trait_def.get("value_max", 1.0)
+		v_min_arr = np.asarray(v_min, dtype=np.float32)
+		v_max_arr = np.asarray(v_max, dtype=np.float32)
+		if v_min_arr.ndim == 0 and v_max_arr.ndim == 0:
+			v_min_arr = np.array([float(v_min_arr)], dtype=np.float32)
+			v_max_arr = np.array([float(v_max_arr)], dtype=np.float32)
+		else:
+			v_min_arr = np.atleast_1d(v_min_arr).astype(np.float32)
+			v_max_arr = np.atleast_1d(v_max_arr).astype(np.float32)
+			if v_min_arr.shape != v_max_arr.shape:
+				name = trait_def.get("name", "trait")
+				raise ValueError(f"value_min/value_max shape mismatch for {name}.")
+		dim = int(v_min_arr.shape[0])
+		return dim, v_min_arr, v_max_arr
+
+	def _trait_value_bounds(self):
+		lows = []
+		highs = []
+		for v_min, v_max in zip(self.trait_value_mins, self.trait_value_maxs):
+			lows.extend(v_min.tolist())
+			highs.extend(v_max.tolist())
+		return np.asarray(lows, dtype=np.float32), np.asarray(highs, dtype=np.float32)
 
 	def seed(self, seed=None):
 		if hasattr(self.env, "seed"):
@@ -253,92 +242,132 @@ class PreferenceWrapperGym(gym.Env):
 		else:
 			np.random.seed()
 
-	def _sample_pref(self):
-		# sometimes I want to fix preference
-		if self.fixed_pref is not None:
-			return self.fixed_pref.copy()
-		# Otherwise, sample p uniformly in [p_min, p_max]^pref_dim.
-		# but maybe we could eventualy start sampling according to perimeters?
-		# and then the holdout would be on an interpolation of the perimeters.
-		return np.random.uniform(self.p_min, self.p_max, size=(self.pref_dim,)).astype(np.float32)
+	def _sample_trait_values(self):
+		if self.fixed_values is not None:
+			return np.asarray(self.fixed_values, dtype=np.float32).reshape(-1)
+		values = []
+		for dim, v_min, v_max in zip(self.trait_dims, self.trait_value_mins, self.trait_value_maxs):
+			sample = np.asarray(np.random.uniform(v_min, v_max), dtype=np.float32)
+			if dim == 1:
+				values.append(float(sample[0]))
+			else:
+				values.extend(sample.tolist())
+		return np.asarray(values, dtype=np.float32)
 
-	def set_pref(self, p):
-		"""
-		Manually set the current preference vector (used e.g. at eval time).
-		"""
-		p = np.asarray(p, dtype=np.float32).reshape(-1)
-		assert p.shape[0] == self.pref_dim, f"Expected p of dim {self.pref_dim}, got {p.shape[0]}"
-		self.current_pref = p
+	def _sample_trait_mask(self):
+		if self.fixed_mask is not None:
+			return np.asarray(self.fixed_mask, dtype=np.float32).reshape(-1)
+		if self.mask_mode == "random":
+			mask_prob = self.traits_cfg.get("mask_prob", 1.0)
+			if isinstance(mask_prob, (list, tuple)):
+				mask_prob = np.asarray(mask_prob, dtype=np.float32)
+				if mask_prob.shape[0] != self.n_traits:
+					mask_prob = np.full(self.n_traits, float(mask_prob[0]))
+			else:
+				mask_prob = np.full(self.n_traits, float(mask_prob))
+			return (np.random.uniform(0.0, 1.0, size=(self.n_traits,)) < mask_prob).astype(np.float32)
+		return np.ones(self.n_traits, dtype=np.float32)
+
+	def set_traits(self, values=None, mask=None):
+		if values is not None:
+			self.override_values = np.asarray(values, dtype=np.float32).reshape(-1)
+			self.current_traits = self.override_values.copy()
+		if mask is not None:
+			self.override_mask = np.asarray(mask, dtype=np.float32).reshape(-1)
+			self.current_mask = self.override_mask.copy()
+
+	def clear_traits(self):
+		self.override_values = None
+		self.override_mask = None
+
+	def _ensure_traits(self, resample=False):
+		if self.override_values is not None:
+			self.current_traits = self.override_values.copy()
+		elif self.current_traits is None or resample:
+			self.current_traits = self._sample_trait_values()
+
+		if self.override_mask is not None:
+			self.current_mask = self.override_mask.copy()
+		elif self.current_mask is None or resample:
+			self.current_mask = self._sample_trait_mask()
 
 	def _augment_obs(self, obs):
-		if self.current_pref is None:
-			self.current_pref = self._sample_pref()
-		return np.concatenate([obs, self.current_pref], axis=-1)
+		traits = self.current_traits if self.current_traits is not None else np.zeros(self.total_trait_dim, dtype=np.float32)
+		mask = self.current_mask if self.current_mask is not None else np.ones(self.n_traits, dtype=np.float32)
+		return np.concatenate([obs, traits, mask], axis=-1)
+
+	def _trait_value(self, trait_idx):
+		start, end = self.trait_slices[trait_idx]
+		vals = self.current_traits[start:end]
+		if end - start == 1:
+			return float(vals[0])
+		return vals
+
+	def _compute_trait_reward(self, raw_obs, trait_idx, env_info, action):
+		trait_def = self.trait_defs[trait_idx]
+		trait_val = self._trait_value(trait_idx)
+		reward_fn = self.reward_fns[trait_idx]
+		trait_info = {
+			"trait_name": trait_def.get("name", f"trait_{trait_idx}"),
+			"trait_index": trait_idx,
+			"trait_value": trait_val,
+			"prev_raw_obs": self.prev_raw_obs,
+			"env_info": env_info,
+			"action": action,
+		}
+		return reward_fn(raw_obs, trait_info)
 
 	def reset(self, **kwargs):
 		options = kwargs.get("options", {})
 		new_seed = options.get("seed", None)
 		if new_seed is not None:
 			self.seed(seed=new_seed)
-		raw_obs = self.env.reset()
-		# compute and store the raw joint angle at reset (position 0) if possible.
-		norm_angle = float(raw_obs[self.joint_index])
-		if self.obs_min is not None and self.obs_max is not None:
-			j_min = float(self.obs_min[self.joint_index])
-			j_max = float(self.obs_max[self.joint_index])
-			self.reset_joint_angle = ((norm_angle / 2.0) + 0.5) * (j_max - j_min + 1e-6) + j_min
-		else:
-			self.reset_joint_angle = norm_angle
-		if self.current_pref is None:
-			self.current_pref = self._sample_pref()
-		obs = self._augment_obs(raw_obs)
+		norm_obs = self.env.reset()
+		self._ensure_traits(resample=self.resample_on_reset or self.current_traits is None)
+		raw_obs = denormalize_obs(norm_obs, self.obs_min, self.obs_max)
+		self.prev_raw_obs = raw_obs
+		obs = self._augment_obs(norm_obs)
 		return obs
 
 	def step(self, action):
-		raw_obs, reward, done, info = self.env.step(action)
+		norm_obs, reward, done, info = self.env.step(action)
+		self._ensure_traits(resample=False)
+		raw_obs = denormalize_obs(norm_obs, self.obs_min, self.obs_max)
+		shaped_reward = float(reward)
+		trait_rewards = []
+		trait_metrics = {}
+		for i in range(self.n_traits):
+			mask_val = float(self.current_mask[i]) if self.current_mask is not None else 1.0
+			if mask_val <= 0.0:
+				trait_rewards.append(0.0)
+				continue
+			trait_reward, metrics = self._compute_trait_reward(raw_obs, i, info, action)
+			lambda_i = float(self.trait_defs[i].get("lambda", self.trait_defs[i].get("weight", 1.0)))
+			weighted = mask_val * lambda_i * float(trait_reward)
+			trait_rewards.append(weighted)
+			for key, val in metrics.items():
+				trait_metrics[f"trait_{self.trait_defs[i].get('name', i)}_{key}"] = float(val)
+			shaped_reward += weighted
 
-		# pply joint-angle based preference shaping to the reward using the base observation
-		# (before concatenating p). raw_obs here is normalized by ObservationWrapperGym,
-		# so we optionally unnormalize it back to the physical joint angle using obs_min/obs_max.
-		norm_angle = float(raw_obs[self.joint_index])
-		if self.obs_min is not None and self.obs_max is not None:
-			j_min = float(self.obs_min[self.joint_index])
-			j_max = float(self.obs_max[self.joint_index])
-			# norm = 2 * ((raw - min) / (max - min + 1e-6) - 0.5)
-			# => raw = ((norm / 2 + 0.5) * (max - min + 1e-6)) + min
-			joint_angle_raw = ((norm_angle / 2.0) + 0.5) * (j_max - j_min + 1e-6) + j_min
-		else:
-			joint_angle_raw = norm_angle
-		foot_dev = None
-		if self.lambda_joint != 0.0 and self.current_pref is not None:
-			foot_dev = float(abs(joint_angle_raw - self.neutral_angle))
-			shaped_reward = compute_joint_pref_reward(
-				base_reward=reward,
-				joint_angle=joint_angle_raw,
-				p=self.current_pref,
-				neutral_angle=self.neutral_angle,
-				lambda_joint=self.lambda_joint,
-			)
-		else:
-			shaped_reward = reward
-
-		obs = self._augment_obs(raw_obs)
+		obs = self._augment_obs(norm_obs)
 		info = dict(info)
-		info["pref"] = self.current_pref.copy() if self.current_pref is not None else None
 		info["base_reward"] = float(reward)
 		info["shaped_reward"] = float(shaped_reward)
-		info["foot_angle_raw"] = float(joint_angle_raw)
-		if self.reset_joint_angle is not None:
-			info["foot_angle_reset"] = float(self.reset_joint_angle)
-		if foot_dev is not None:
-			info["foot_angle_dev"] = foot_dev
+		info["trait_values"] = self.current_traits.copy() if self.current_traits is not None else None
+		info["trait_mask"] = self.current_mask.copy() if self.current_mask is not None else None
+		info["trait_rewards"] = trait_rewards
+		info["raw_obs"] = raw_obs.copy()
+		if self.prev_raw_obs is not None:
+			info["prev_raw_obs"] = self.prev_raw_obs.copy()
+		info.update(trait_metrics)
+		self.prev_raw_obs = raw_obs
 		return obs, shaped_reward, done, info
 
 	def render(self, mode="human", **kwargs):
 		if hasattr(self.env, "render"):
 			return self.env.render(mode=mode, **kwargs)
 		raise NotImplementedError
-	
+
 
 class ActionChunkWrapper(gymnasium.Env):
 	def __init__(self, env, cfg, max_episode_steps=300):
@@ -388,6 +417,11 @@ class ActionChunkWrapper(gymnasium.Env):
 	
 	def close(self):
 		return
+
+	def set_traits(self, values=None, mask=None):
+		if hasattr(self.env, "set_traits"):
+			return self.env.set_traits(values=values, mask=mask)
+		return None
 	
 
 class DiffusionPolicyEnvWrapper(VecEnvWrapper):
@@ -396,7 +430,7 @@ class DiffusionPolicyEnvWrapper(VecEnvWrapper):
 		self.action_horizon = cfg.act_steps
 		self.action_dim = cfg.action_dim
 		# Base observation dimension expected by the diffusion policy.
-		# This allows us to later extend the observation space (e.g., by appending preferences)
+		# This allows us to later extend the observation space (e.g., by appending traits)
 		# while still feeding only the original state to the diffusion model.
 		self.base_obs_dim = cfg.obs_dim
 		self.action_space = spaces.Box(
@@ -404,7 +438,7 @@ class DiffusionPolicyEnvWrapper(VecEnvWrapper):
 			high=cfg.train.action_magnitude*np.ones(self.action_dim*self.action_horizon),
 			dtype=np.float32
 		)
-		# use the wrapped VecEnv observation space (which may include preferences)
+		# use the wrapped VecEnv observation space (which may include traits)
 		self.observation_space = self.venv.observation_space
 		self.obs_dim = int(np.prod(self.observation_space.shape))
 		self.env = env

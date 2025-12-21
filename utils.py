@@ -7,6 +7,7 @@ import wandb
 import numpy as np
 from stable_baselines3.common.callbacks import BaseCallback
 import hydra
+from omegaconf import OmegaConf
 
 
 class DPPOBasePolicyWrapper:
@@ -19,7 +20,7 @@ class DPPOBasePolicyWrapper:
 			self.obs_dim = base_policy.obs_dim
 		
 	def __call__(self, obs, initial_noise, return_numpy=True):
-		# if the env observation has been extended (e.g., with preferences),
+		# if the env observation has been extended (e.g., with traits),
 		# slice back to the base diffusion model's obs_dim before calling it.
 		if hasattr(self, "obs_dim"):
 			obs = obs[..., : self.obs_dim]
@@ -57,6 +58,7 @@ class LoggingCallback(BaseCallback):
 		max_steps=-1,
 		deterministic_eval=False,
 		log_dir: Optional[str] = None,
+		trait_schedule: Optional[dict] = None,
 	):
 		super().__init__(verbose)
 		self.action_chunk = action_chunk
@@ -79,10 +81,17 @@ class LoggingCallback(BaseCallback):
 		self.max_steps = max_steps
 		self.deterministic_eval = deterministic_eval
 		self.log_dir = log_dir
+		if OmegaConf.is_config(trait_schedule):
+			trait_schedule = OmegaConf.to_container(trait_schedule, resolve=True)
+		self.trait_schedule = trait_schedule
+		self._trait_phase_index = 0
+		self._trait_phase_start = 0
+		self._trait_best_eval = None
+		self._trait_plateau_count = 0
 		self.local_log_path = None
 		if self.log_dir is not None:
 			os.makedirs(self.log_dir, exist_ok=True)
-			self.local_log_path = os.path.join(self.log_dir, "preference_metrics.csv")
+			self.local_log_path = os.path.join(self.log_dir, "trait_metrics.csv")
 			if not os.path.exists(self.local_log_path):
 				with open(self.local_log_path, mode="w", newline="") as f:
 					writer = csv.writer(f)
@@ -93,12 +102,50 @@ class LoggingCallback(BaseCallback):
 						"ep_rew_mean",
 						"base_rew_mean_step",
 						"shaped_rew_mean_step",
-						"foot_angle_dev_mean_step",
-						"foot_angle_raw_mean_step",
-						"foot_angle_reset_mean_step",
-						"p0_mean_step",
-						"p1_mean_step",
 					])
+
+	def _on_training_start(self):
+		self._apply_current_trait_mask()
+		return True
+
+	def _apply_current_trait_mask(self):
+		if not self.trait_schedule:
+			return
+		phases = self.trait_schedule.get("phases", [])
+		if not phases:
+			return
+		phase = phases[min(self._trait_phase_index, len(phases) - 1)]
+		mask = phase.get("mask", None)
+		if mask is None:
+			return
+		if self.training_env is not None:
+			self.training_env.env_method("set_traits", mask=mask)
+		if self.eval_env is not None:
+			self.eval_env.env_method("set_traits", mask=mask)
+
+	def _maybe_advance_trait_phase(self, eval_reward):
+		if not self.trait_schedule:
+			return
+		phases = self.trait_schedule.get("phases", [])
+		if not phases or self._trait_phase_index >= len(phases) - 1:
+			return
+		min_steps = self.trait_schedule.get("min_steps", 0) # at least many steps to wait before advancing to the next phase
+		patience = self.trait_schedule.get("patience", 0) # how many evals (episodes) without improvement to consider as convergence
+		min_delta = self.trait_schedule.get("min_delta", 0.0) # what counts as improvement (we want `patience` evals without improvement to consider as convergence)
+		phase_min_steps = phases[self._trait_phase_index].get("min_steps", min_steps)
+		if (self.total_timesteps - self._trait_phase_start) < phase_min_steps:
+			return
+		if self._trait_best_eval is None or eval_reward > (self._trait_best_eval + min_delta):
+			self._trait_best_eval = eval_reward
+			self._trait_plateau_count = 0
+			return
+		self._trait_plateau_count += 1
+		if self._trait_plateau_count >= patience:
+			self._trait_phase_index += 1
+			self._trait_phase_start = self.total_timesteps
+			self._trait_best_eval = None
+			self._trait_plateau_count = 0
+			self._apply_current_trait_mask()
 
 	def _on_step(self):
 		# per-step / per-env logging
@@ -108,29 +155,12 @@ class LoggingCallback(BaseCallback):
 				self.episode_lengths.append(info['episode']['l'])
 		base_rewards = []
 		shaped_rewards = []
-		foot_devs = []
-		foot_angles = []
-		foot_reset_angles = []
-		p0_vals = []
-		p1_vals = []
 		for info in self.locals['infos']:
 			if isinstance(info, dict):
 				if 'base_reward' in info:
 					base_rewards.append(info['base_reward'])
 				if 'shaped_reward' in info:
 					shaped_rewards.append(info['shaped_reward'])
-				if 'foot_angle_dev' in info:
-					foot_devs.append(info['foot_angle_dev'])
-				if 'foot_angle_raw' in info:
-					foot_angles.append(info['foot_angle_raw'])
-				if 'foot_angle_reset' in info:
-					foot_reset_angles.append(info['foot_angle_reset'])
-				if 'pref' in info and info['pref'] is not None:
-					p = info['pref']
-					if len(p) > 0:
-						p0_vals.append(p[0])
-					if len(p) > 1:
-						p1_vals.append(p[1])
 
 		rew = self.locals['rewards']
 		self.total_reward += np.mean(rew)
@@ -156,16 +186,6 @@ class LoggingCallback(BaseCallback):
 						log_payload["train/base_rew_mean_step"] = float(np.mean(base_rewards))
 					if len(shaped_rewards) > 0:
 						log_payload["train/shaped_rew_mean_step"] = float(np.mean(shaped_rewards))
-					if len(foot_devs) > 0:
-						log_payload["train/foot_angle_dev_mean_step"] = float(np.mean(foot_devs))
-					if len(foot_angles) > 0:
-						log_payload["train/foot_angle_raw_mean_step"] = float(np.mean(foot_angles))
-					if len(foot_reset_angles) > 0:
-						log_payload["train/foot_angle_reset_mean_step"] = float(np.mean(foot_reset_angles))
-					if len(p0_vals) > 0:
-						log_payload["train/p0_mean_step"] = float(np.mean(p0_vals))
-					if len(p1_vals) > 0:
-						log_payload["train/p1_mean_step"] = float(np.mean(p1_vals))
 
 					wandb.log(log_payload, step=self.log_count)
 					if np.sum(self.episode_completed) > 0:
@@ -186,11 +206,6 @@ class LoggingCallback(BaseCallback):
 							float(np.mean(self.episode_rewards)),
 							float(np.mean(base_rewards)) if len(base_rewards) > 0 else "",
 							float(np.mean(shaped_rewards)) if len(shaped_rewards) > 0 else "",
-							float(np.mean(foot_devs)) if len(foot_devs) > 0 else "",
-							float(np.mean(foot_angles)) if len(foot_angles) > 0 else "",
-							float(np.mean(foot_reset_angles)) if len(foot_reset_angles) > 0 else "",
-							float(np.mean(p0_vals)) if len(p0_vals) > 0 else "",
-							float(np.mean(p1_vals)) if len(p1_vals) > 0 else "",
 						])
 				self.episode_rewards = []
 				self.episode_lengths = []
@@ -199,7 +214,9 @@ class LoggingCallback(BaseCallback):
 				self.episode_completed = np.zeros(self.num_train_env)
 
 		if self.n_calls % self.eval_freq == 0:
-			self.evaluate(self.locals['self'], deterministic=False)
+			eval_reward = self.evaluate(self.locals['self'], deterministic=False)
+			if eval_reward is not None:
+				self._maybe_advance_trait_phase(eval_reward)
 			if self.deterministic_eval:
 				self.evaluate(self.locals['self'], deterministic=True)
 		return True
@@ -249,6 +266,8 @@ class LoggingCallback(BaseCallback):
 							f"{name}/reward": avg_rew,
 							f"{name}/timesteps": self.total_timesteps,
 						}, step=self.log_count)
+				return avg_rew
+		return None
 
 	def set_timesteps(self, timesteps):
 		self.total_timesteps = timesteps

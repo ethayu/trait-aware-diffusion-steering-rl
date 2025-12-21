@@ -24,6 +24,32 @@ act_steps: 4
 load_offline_data: False
 deterministic_eval: False 
 
+traits:
+  enabled: true
+  resample_on_reset: true
+  mask_mode: all_on
+  # Override at inference time with trait_values / trait_mask.
+  schedule:
+    min_steps: 250000
+    patience: 3
+    min_delta: 0.01
+    phases:
+      - mask: [1, 0]
+      - mask: [0, 1]
+      - mask: [1, 1]
+  defs:
+    - name: thigh_gap
+      value_min: 0.2
+      value_max: 1.2
+      lambda: 1.0
+    - name: speed_target
+      value_min: 0.5
+      value_max: 1.5
+      lambda: 1.0
+
+trait_values: null
+trait_mask: null
+
 eval_interval: 4000
 num_evals: 200
 save_model_interval: 10000

@@ -21,7 +21,7 @@ from env_utils import (
 	DiffusionPolicyEnvWrapper,
 	ObservationWrapperRobomimic,
 	ObservationWrapperGym,
-	PreferenceWrapperGym,
+	TraitWrapperGym,
 	ActionChunkWrapper,
 	make_robomimic_env,
 )
@@ -63,24 +63,9 @@ def main(cfg: OmegaConf):
 		if cfg.env_name in ['halfcheetah-medium-v2', 'hopper-medium-v2', 'walker2d-medium-v2']:
 			env = gym.make(cfg.env_name)
 			env = ObservationWrapperGym(env, cfg.normalization_path)
-			# append a preference vector p to the observation for gym Mujoco tasks.
-			if hasattr(cfg, "pref_dim") and cfg.pref_dim > 0:
-				p_min = getattr(cfg, "pref_p_min", -1.0)
-				p_max = getattr(cfg, "pref_p_max", 1.0)
-				joint_index = getattr(cfg, "pref_joint_index", 4)
-				neutral_angle = getattr(cfg, "pref_neutral_angle", 0.0)
-				lambda_joint = getattr(cfg, "pref_lambda_joint", 1.0)
-				fixed_pref = getattr(cfg, "pref_fixed_p", None)
-				env = PreferenceWrapperGym(
-					env,
-					pref_dim=cfg.pref_dim,
-					p_min=p_min,
-					p_max=p_max,
-					joint_index=joint_index,
-					neutral_angle=neutral_angle,
-					lambda_joint=lambda_joint,
-					fixed_pref=fixed_pref,
-				)
+			traits_cfg = getattr(cfg, "traits", None)
+			if traits_cfg is not None and getattr(traits_cfg, "enabled", False):
+				env = TraitWrapperGym(env, traits_cfg)
 		elif cfg.env_name in ['lift', 'can', 'square', 'transport']:
 			env = make_robomimic_env(env=cfg.env_name, normalization_path=cfg.normalization_path, low_dim_keys=cfg.env.wrappers.robomimic_lowdim.low_dim_keys, dppo_path=cfg.dppo_path)
 			env = ObservationWrapperRobomimic(env, reward_offset=cfg.env.reward_offset)
@@ -185,6 +170,7 @@ def main(cfg: OmegaConf):
 		max_steps=MAX_STEPS,
 		deterministic_eval=cfg.deterministic_eval,
 		log_dir=cfg.logdir,
+		trait_schedule=cfg.traits.schedule if hasattr(cfg, "traits") else None,
 	)
 
 	logging_callback.evaluate(model, deterministic=False)

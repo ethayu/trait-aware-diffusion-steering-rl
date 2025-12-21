@@ -17,7 +17,7 @@ from stable_baselines3.common.vec_env import DummyVecEnv
 from env_utils import (
     ObservationWrapperGym,
     ObservationWrapperRobomimic,
-    PreferenceWrapperGym,
+    TraitWrapperGym,
     ActionChunkWrapper,
     make_robomimic_env,
 )
@@ -37,31 +37,15 @@ def make_single_env(cfg):
     """
     Create a single environment with the same wrappers as used during training.
     This mirrors `make_env` in `train_dsrl.py` so that the loaded checkpoint's
-    observation_space matches the eval env (including preferences).
+    observation_space matches the eval env (including traits).
     """
     if cfg.env_name in ["halfcheetah-medium-v2", "hopper-medium-v2", "walker2d-medium-v2"]:
         env = gym.make(cfg.env_name)
         env = ObservationWrapperGym(env, cfg.normalization_path)
 
-        # If a preference dimension is configured, append the same preference
-        # wrapper used during training so obs dim matches the checkpoint.
-        if hasattr(cfg, "pref_dim") and cfg.pref_dim > 0:
-            p_min = getattr(cfg, "pref_p_min", -1.0)
-            p_max = getattr(cfg, "pref_p_max", 1.0)
-            joint_index = getattr(cfg, "pref_joint_index", 4)
-            neutral_angle = getattr(cfg, "pref_neutral_angle", 0.0)
-            lambda_joint = getattr(cfg, "pref_lambda_joint", 1.0)
-            fixed_pref = getattr(cfg, "pref_fixed_p", None)
-            env = PreferenceWrapperGym(
-                env,
-                pref_dim=cfg.pref_dim,
-                p_min=p_min,
-                p_max=p_max,
-                joint_index=joint_index,
-                neutral_angle=neutral_angle,
-                lambda_joint=lambda_joint,
-                fixed_pref=fixed_pref,
-            )
+        traits_cfg = getattr(cfg, "traits", None)
+        if traits_cfg is not None and getattr(traits_cfg, "enabled", False):
+            env = TraitWrapperGym(env, traits_cfg)
     elif cfg.env_name in ["lift", "can", "square", "transport"]:
         env = make_robomimic_env(
             env=cfg.env_name,
@@ -88,6 +72,18 @@ def _get_render_env(vec_env):
         base = base.venv
     # DummyVecEnv exposes envs list
     return base.envs[0]
+
+
+def _get_trait_wrapper(vec_env):
+    base = _get_render_env(vec_env)
+    env = base
+    while hasattr(env, "env"):
+        if isinstance(env, TraitWrapperGym):
+            return env
+        env = env.env
+    if isinstance(env, TraitWrapperGym):
+        return env
+    return None
 
 
 def record_episodes(
@@ -172,6 +168,12 @@ def main(cfg: OmegaConf):
     torch.manual_seed(cfg.seed)
 
     vec_env = DummyVecEnv([lambda: make_single_env(cfg)])
+    trait_wrapper = _get_trait_wrapper(vec_env)
+    if trait_wrapper is not None:
+        trait_values = cfg.get("trait_values", None)
+        trait_mask = cfg.get("trait_mask", None)
+        if trait_values is not None or trait_mask is not None:
+            trait_wrapper.set_traits(values=trait_values, mask=trait_mask)
 
     # Re-instantiate the diffusion base policy just like in training, so we
     # can reattach it to the loaded DSRL model if it fails to deserialize.

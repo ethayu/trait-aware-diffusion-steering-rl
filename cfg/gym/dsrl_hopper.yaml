@@ -18,17 +18,6 @@ use_wandb: True
 env_name: hopper-medium-v2
 log_dir: ./logs
 obs_dim: 11  # Base state dim used by the diffusion model
-pref_dim: 2  # additional preference dimensions appended to the observation in our case its [p0, p1]
-# Preference vector entries are sampled in [0, 1] and then normalized internally.
-pref_p_min: 0.0
-pref_p_max: 1.0
-# for initial lambda_joint debugging, I keept p fixed at [0, 1]: full joint preference).
-# Remove or comment this out later to return to random sampling.
-pref_fixed_p: [0.0, 1.0]
-# Preference shaping for Hopper foot joint (index 4 in the normalized state from ObservationWrapperGym)
-pref_joint_index: 4
-pref_neutral_angle: 0.0
-pref_lambda_joint: 10.0
 action_dim: 3
 cond_steps: 1
 act_steps: 4
