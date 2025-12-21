@@ -13,7 +13,7 @@ import json
 from dppo.env.gym_utils.wrapper import wrapper_dict
 import robomimic.utils.env_utils as EnvUtils
 import robomimic.utils.obs_utils as ObsUtils
-from traits import get_trait_reward_fn
+from traits import get_base_reward_fn, get_trait_reward_fn
 
 
 def denormalize_obs(
@@ -187,6 +187,7 @@ class TraitWrapperGym(gym.Env):
 		self.current_traits = None
 		self.current_mask = None
 		self.prev_raw_obs = None
+		self.base_reward_fn = None
 
 		self.trait_slices = []
 		start = 0
@@ -199,6 +200,9 @@ class TraitWrapperGym(gym.Env):
 			if trait_name is None:
 				raise ValueError("Each trait must define name.")
 			self.reward_fns.append(get_trait_reward_fn(trait_name))
+		base_reward_name = self.traits_cfg.get("base_reward_fn", None)
+		if base_reward_name is not None:
+			self.base_reward_fn = get_base_reward_fn(base_reward_name)
 
 		env_low = env.observation_space.low
 		env_high = env.observation_space.high
@@ -333,7 +337,18 @@ class TraitWrapperGym(gym.Env):
 		norm_obs, reward, done, info = self.env.step(action)
 		self._ensure_traits(resample=False)
 		raw_obs = denormalize_obs(norm_obs, self.obs_min, self.obs_max)
-		shaped_reward = float(reward)
+		env_reward = float(reward)
+		if self.base_reward_fn is not None:
+			base_info = {
+				"prev_raw_obs": self.prev_raw_obs,
+				"env_info": info,
+				"action": action,
+				"original_reward": env_reward,
+			}
+			base_reward = float(self.base_reward_fn(raw_obs, base_info))
+		else:
+			base_reward = env_reward
+		shaped_reward = float(base_reward)
 		trait_rewards = []
 		trait_metrics = {}
 		for i in range(self.n_traits):
@@ -351,7 +366,8 @@ class TraitWrapperGym(gym.Env):
 
 		obs = self._augment_obs(norm_obs)
 		info = dict(info)
-		info["base_reward"] = float(reward)
+		info["env_reward"] = env_reward
+		info["base_reward"] = float(base_reward)
 		info["shaped_reward"] = float(shaped_reward)
 		info["trait_values"] = self.current_traits.copy() if self.current_traits is not None else None
 		info["trait_mask"] = self.current_mask.copy() if self.current_mask is not None else None

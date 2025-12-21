@@ -39,8 +39,25 @@ TRAIT_REWARD_FNS: Dict[str, Callable[[np.ndarray, dict], Tuple[float, dict]]] = 
 	"speed_target": speed_target,
 }
 
+def healthy_reward(raw_obs: np.ndarray, info: dict) -> float:
+	"""
+	Return 1.0 for every step.
+	"""
+	return 1.0
+
+
+BASE_REWARD_FNS: Dict[str, Callable[[np.ndarray, dict], float]] = {
+	"healthy_reward": healthy_reward,
+}
+
 
 def get_trait_reward_fn(name: str) -> Callable[[np.ndarray, dict], Tuple[float, dict]]:
 	if name not in TRAIT_REWARD_FNS:
 		raise KeyError(f"Unknown trait name '{name}'. Define it in traits.py.")
 	return TRAIT_REWARD_FNS[name]
+
+
+def get_base_reward_fn(name: str) -> Callable[[np.ndarray, dict], float]:
+	if name not in BASE_REWARD_FNS:
+		raise KeyError(f"Unknown base_reward_fn '{name}'. Define it in traits.py.")
+	return BASE_REWARD_FNS[name]

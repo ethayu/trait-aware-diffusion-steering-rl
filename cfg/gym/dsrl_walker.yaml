@@ -28,6 +28,7 @@ traits:
   enabled: true
   resample_on_reset: true
   mask_mode: all_on
+  base_reward_fn: healthy_reward
   # Override at inference time with trait_values / trait_mask.
   schedule:
     min_steps: 250000
