@@ -26,6 +26,7 @@ deterministic_eval: False
 
 # Inference helpers
 model_path: ""
+record_episodes: 10
 eval_episodes: 10
 record_video: false
 video_dir: videos_inference

@@ -67,48 +67,60 @@ def _get_trait_wrapper(vec_env):
 
 
 def run_episodes(model, vec_env, cfg, episodes, deterministic):
-	returns = []
-	max_steps = cfg.env.max_episode_steps
-	record_video = bool(cfg.get("record_video", False))
-	video_dir = cfg.get("video_dir", "videos_inference")
-	video_episodes = int(cfg.get("video_episodes", 2))
-	video_fps = int(cfg.get("video_fps", 30))
-	video_indices = set(range(min(video_episodes, episodes)))
-	writer = None
-	if record_video:
-		os.makedirs(video_dir, exist_ok=True)
-		import imageio
-		writer = imageio
-	for ep_idx in range(episodes):
-		obs = vec_env.reset()
-		done = np.array([False])
-		ep_return = 0.0
-		steps = 0
-		frames = []
-		if record_video and ep_idx in video_indices:
-			render_env = vec_env
-			if hasattr(render_env, "venv"):
-				render_env = render_env.venv
-			render_env = render_env.envs[0]
-		while not done[0] and steps < max_steps:
-			if cfg.algorithm == "dsrl_sac":
-				action, _ = model.predict(obs, deterministic=deterministic)
-			else:
-				action, _ = model.predict_diffused(obs, deterministic=deterministic)
-			obs, rewards, dones, infos = vec_env.step(action)
-			if record_video and writer is not None and ep_idx in video_indices:
-				frame = render_env.render(mode="rgb_array")
-				frames.append(frame)
-			ep_return += float(rewards[0])
-			done = dones
-			steps += 1
-		returns.append(ep_return)
-		if record_video and writer is not None and len(frames) > 0 and ep_idx in video_indices:
-			video_path = os.path.join(video_dir, f"episode_{ep_idx}.mp4")
-			with writer.get_writer(video_path, fps=video_fps) as video:
-				for frame in frames:
-					video.append_data(frame)
-	return returns
+    returns = []
+    metric_agg = {}  # To track trait_speed_target_speed, trait_thigh_gap_gap, etc.
+    max_steps = cfg.env.max_episode_steps
+    record_video = bool(cfg.get("record_video", False))
+    video_dir = cfg.get("video_dir", "videos_inference")
+    video_episodes = int(cfg.get("video_episodes", 2))
+    video_fps = int(cfg.get("video_fps", 30))
+    video_indices = set(range(min(video_episodes, episodes)))
+    writer = None
+    if record_video:
+        os.makedirs(video_dir, exist_ok=True)
+        import imageio
+        writer = imageio
+    for ep_idx in range(episodes):
+        obs = vec_env.reset()
+        done = np.array([False])
+        ep_return = 0.0
+        steps = 0
+        frames = []
+        if record_video and ep_idx in video_indices:
+            render_env = vec_env
+            if hasattr(render_env, "venv"):
+                render_env = render_env.venv
+            render_env = render_env.envs[0]
+        while not done[0] and steps < max_steps:
+            if cfg.algorithm == "dsrl_sac":
+                action, _ = model.predict(obs, deterministic=deterministic)
+            else:
+                action, _ = model.predict_diffused(obs, deterministic=deterministic)
+            obs, rewards, dones, infos = vec_env.step(action)
+            
+            # Aggregate trait metrics from the first env in the vector
+            info = infos[0]
+            for k, v in info.items():
+                if k.startswith("trait_") and not isinstance(v, (np.ndarray, list)):
+                    if k not in metric_agg:
+                        metric_agg[k] = []
+                    metric_agg[k].append(float(v))
+
+            if record_video and writer is not None and ep_idx in video_indices:
+                frame = render_env.render(mode="rgb_array")
+                frames.append(frame)
+            ep_return += float(rewards[0])
+            done = dones
+            steps += 1
+        returns.append(ep_return)
+        if record_video and writer is not None and len(frames) > 0 and ep_idx in video_indices:
+            video_path = os.path.join(video_dir, f"episode_{ep_idx}.mp4")
+            with writer.get_writer(video_path, fps=video_fps) as video:
+                for frame in frames:
+                    video.append_data(frame)
+    # Calculate means for all collected metrics
+    avg_metrics = {k: np.mean(v) for k, v in metric_agg.items()}
+    return returns, avg_metrics
 
 
 @hydra.main(
@@ -162,8 +174,10 @@ def main(cfg: OmegaConf):
 
     episodes = int(cfg.get("eval_episodes", 10))
     deterministic = bool(cfg.get("deterministic_eval", False))
-    returns = run_episodes(model, vec_env, cfg, episodes, deterministic)
+    returns, metrics = run_episodes(model, vec_env, cfg, episodes, deterministic)
     print(f"[run_inference] episodes={episodes} mean_return={np.mean(returns):.3f} std_return={np.std(returns):.3f}")
+    for k, v in metrics.items():
+        print(f"[run_inference] metric_{k}={v:.4f}")
     print("[run_inference] returns", returns)
 
 
