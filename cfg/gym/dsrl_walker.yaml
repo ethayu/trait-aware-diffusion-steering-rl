@@ -41,11 +41,22 @@ traits:
   schedule:
     min_steps: 250000
     patience: 3
-    min_delta: 0.01
+    min_delta: 0.0
     phases:
       - mask: [1, 0]
       - mask: [0, 1]
       - mask: [1, 1]
+  logging:
+    enabled: true
+    auto_plots: true
+    sweep_points: 5
+    sweep_max_points: 25
+    sweep_episodes: 2
+    sweep_interval: 5
+    sweep_deterministic: true
+    cross_mask_eval: true
+    cross_mask_episodes: 2
+    cross_mask_deterministic: true
   defs:
     - name: thigh_gap
       value_min: 0.2

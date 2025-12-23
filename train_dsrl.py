@@ -170,7 +170,7 @@ def main(cfg: OmegaConf):
 		max_steps=MAX_STEPS,
 		deterministic_eval=cfg.deterministic_eval,
 		log_dir=cfg.logdir,
-		trait_schedule=cfg.traits.schedule if hasattr(cfg, "traits") else None,
+		trait_cfg=cfg.traits if hasattr(cfg, "traits") else None,
 	)
 
 	logging_callback.evaluate(model, deterministic=False)

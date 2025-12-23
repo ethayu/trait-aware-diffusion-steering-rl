@@ -438,6 +438,11 @@ class ActionChunkWrapper(gymnasium.Env):
 		if hasattr(self.env, "set_traits"):
 			return self.env.set_traits(values=values, mask=mask)
 		return None
+
+	def clear_traits(self):
+		if hasattr(self.env, "clear_traits"):
+			return self.env.clear_traits()
+		return None
 	
 
 class DiffusionPolicyEnvWrapper(VecEnvWrapper):
