@@ -24,6 +24,14 @@ act_steps: 4
 load_offline_data: False
 deterministic_eval: False 
 
+# Inference helpers
+model_path: ""
+eval_episodes: 10
+record_video: false
+video_dir: videos_inference
+video_episodes: 2
+video_fps: 30
+
 traits:
   enabled: true
   resample_on_reset: true
