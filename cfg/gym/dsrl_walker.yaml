@@ -40,7 +40,8 @@ traits:
   base_reward_fn: healthy_reward
   # Override at inference time with trait_values / trait_mask.
   schedule:
-    min_steps: 250000
+    min_steps: 40000
+    max_steps: 100000
     patience: 3
     min_delta: 0.0
     phases:
@@ -61,7 +62,7 @@ traits:
     - name: thigh_gap
       value_min: 0.05
       value_max: 0.50
-      lambda: 1.0
+      lambda: 10.0
     - name: speed_target
       value_min: 0.6
       value_max: 2.1

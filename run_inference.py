@@ -168,7 +168,21 @@ def main(cfg: OmegaConf):
             critic_backup_combine_type=cfg.train.critic_backup_combine_type,
         )
     load_device = getattr(cfg, "device", "auto")
-    model = ModelCls.load(model_path, env=vec_env, device=load_device, **load_kwargs)
+    
+    # Disable observation space check to allow loading models with different trait bounds
+    # and to allow testing OOD values.
+    custom_objects = {
+        "observation_space": vec_env.observation_space,
+        "action_space": vec_env.action_space,
+    }
+    
+    model = ModelCls.load(
+        model_path, 
+        env=vec_env, 
+        device=load_device, 
+        custom_objects=custom_objects, 
+        **load_kwargs
+    )
     if cfg.algorithm == "dsrl_na" and getattr(model, "diffusion_policy", None) is None:
         model.diffusion_policy = base_policy
 

@@ -7,6 +7,19 @@ conda activate dsrl
 cd dppo
 pip install -e .
 pip install -e .[gym]
+
+# Fix egl-probe CMake compatibility issue before installing robomimic
+# egl-probe requires CMake < 3.5, but newer CMake versions don't support that
+# Download, patch, and install egl-probe manually:
+cd /tmp
+pip download --no-binary egl-probe egl-probe
+tar -xzf egl_probe-*.tar.gz
+cd egl_probe-*
+# Patch CMakeLists.txt to require CMake 3.5 instead of 2.8.12
+sed -i 's/cmake_minimum_required(VERSION 2.8.12)/cmake_minimum_required(VERSION 3.5)/' egl_probe/CMakeLists.txt
+pip install .
+cd ~/proj/diffusion-trait-steering/dppo
+
 pip install -e .[robomimic]
 cd ..
 
@@ -30,6 +43,24 @@ export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/lib/nvidia
 and fix numpy version:
 pip install "numpy<2.0"
 
+install d4rl (requires specific setup):
+# Install cmake and other build dependencies
+conda install -y cmake
+conda install -y -c conda-forge glew patchelf
+
+# Install mujoco 3.x (for dm-control dependency) - use pre-built wheel to avoid build issues
+pip install "mujoco>=3.3.6,<3.4.0" --only-binary=mujoco
+
+# Downgrade Cython to version compatible with mujoco_py
+pip install "cython<3.0"
+
+# Install d4rl
+pip install d4rl
+
+# Set environment variables (add to ~/.bashrc for persistence)
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$HOME/.mujoco/mujoco210/bin
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/lib/nvidia
+
 I put the pretrained hopper checkpoint here: 
 I see, it seems that any changes made to dppo wont be saved.
 Maybe we can think about making a fork of the dppo repo and make the changes there.
@@ -43,6 +74,6 @@ diffusion-trait-steering/dppo/log
 on my end it is here and the only file in the folder is here.
 diffusion-trait-steering/dppo/log/gym-pretrain/hopper-medium-v2_pre_diffusion_mlp_ta4_td20/2024-06-12_23-10-05/checkpoint/state_3000.pt
 
-CUDA_VISIBLE_DEVICES=2 python train_dsrl.py --config-path=cfg/gym --config-name=dsrl_hopper.yaml
+CUDA_VISIBLE_DEVICES=2 python train_dsrl.py --config-path=cfg/gym --config-name=dsrl_walker.yaml
 
 CUDA_VISIBLE_DEVICES=2 python record_hopper_rollouts.py   model_path=/home/aneeshe/projects/diffusion-trait-steering/logs/gym-dsrl/gym_hopper_dsrl_2025-12-06_00-48-39_1/2025-12-06_00-48-39_1/checkpoint/ft_policy_5000_steps.zip   record_episodes=4
