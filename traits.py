@@ -5,16 +5,16 @@ import numpy as np
 
 def thigh_gap(raw_obs: np.ndarray, info: dict) -> Tuple[float, dict]:
 	"""
-	Penalize the difference between two joint angles beyond a threshold.
-	Trait value is the max allowed gap.
+	Penalize the squared distance to a target joint angle difference.
+	Trait value is the desired gap.
 	API: https://gymnasium.farama.org/environments/mujoco/walker2d/
 	"""
 	left_idx, right_idx = 5, 2
 	diff = float(abs(raw_obs[left_idx] - raw_obs[right_idx]))
-	threshold = float(info.get("trait_value", 0.0))
-	penalty = max(0.0, diff - threshold)
-	reward = -(penalty ** 2)
-	metrics = {"gap": diff, "target": threshold}
+	target = float(info.get("trait_value", 0.0))
+	error = diff - target
+	reward = -(error ** 2)
+	metrics = {"gap": diff, "target": target}
 	return reward, metrics
 
 

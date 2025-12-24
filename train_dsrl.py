@@ -37,7 +37,7 @@ base_path = os.path.dirname(os.path.abspath(__file__))
 
 
 @hydra.main(
-	config_path=os.path.join(base_path, "cfg/robomimic"), config_name="dsrl_can.yaml", version_base=None
+	config_path=os.path.join(base_path, "cfg/gym"), config_name="dsrl_walker.yaml", version_base=None
 )
 def main(cfg: OmegaConf):
 	OmegaConf.resolve(cfg)
