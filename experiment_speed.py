@@ -4,9 +4,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # configuration
-MODEL_PATH = "/home/aneeshe/projects/diffusion-trait-steering/logs/gym-dsrl/gym_walker_dsrl_2025-12-22_18-36-41_1/2025-12-22_18-36-41_1/checkpoint/ft_policy_16000_steps.zip"
-SPEED_TARGETS = [0.5, 0.8, 1.0, 1.2, 1.5]
-FIXED_GAP = 0.6
+MODEL_PATH = "/home/asethi04/proj/diffusion-trait-steering/logs/gym-dsrl/gym_walker_dsrl_2025-12-24_13-51-25_1/2025-12-24_13-51-25_1/checkpoint/ft_policy_270000_steps.zip"
+SPEED_TARGETS = [.00, .02, 0.5, 0.8, 1.0, 1.2, 1.4, 1.6, 1.8, 2.0, 2.2, 2.4, 2.6]
+FIXED_GAP = 0.14
 EPISODES = 10
 GPU = "5"
 
@@ -19,7 +19,7 @@ for speed in SPEED_TARGETS:
         "--config-name=dsrl_walker.yaml",
         f"model_path={MODEL_PATH}",
         f"trait_values=[{FIXED_GAP}, {speed}]",
-        "trait_mask=[1, 1]",
+        "trait_mask=[0, 1]",
         f"eval_episodes={EPISODES}",
         "deterministic_eval=True",
         "record_video=False"

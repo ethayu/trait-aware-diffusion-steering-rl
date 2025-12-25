@@ -92,55 +92,69 @@ def main(cfg: OmegaConf):
 		n_critics=cfg.train.n_critics,
 	)
 	if cfg.algorithm == 'dsrl_sac':
-		model = SAC(
-			"MlpPolicy",
-			env,
-			learning_rate=cfg.train.actor_lr,
-			buffer_size=20000000,      # Replay buffer size
-			learning_starts=1,    # How many steps before learning starts (total steps for all env combined)
-			batch_size=cfg.train.batch_size,
-			tau=cfg.train.tau,                # Target network update rate
-			gamma=cfg.train.discount,               # Discount factor
-			train_freq=cfg.train.train_freq,             # Update the model every train_freq steps
-			gradient_steps=cfg.train.utd,         # How many gradient steps to do at each update
-			action_noise=None,        # No additional action noise
-			optimize_memory_usage=False,
-			ent_coef="auto" if cfg.train.ent_coef == -1 else cfg.train.ent_coef,          # Automatic entropy tuning
-			target_update_interval=1, # Update target network every interval
-			target_entropy="auto" if cfg.train.target_ent == -1 else cfg.train.target_ent,    # Automatic target entropy
-			use_sde=False,
-			sde_sample_freq=-1,
-			tensorboard_log=cfg.logdir,
-			verbose=1,
-			policy_kwargs=policy_kwargs,
-		)
+		if getattr(cfg, "resume_path", ""):
+			model = SAC.load(cfg.resume_path, env=env, device=cfg.device)
+		else:
+			model = SAC(
+				"MlpPolicy",
+				env,
+				learning_rate=cfg.train.actor_lr,
+				buffer_size=20000000,      # Replay buffer size
+				learning_starts=1,    # How many steps before learning starts (total steps for all env combined)
+				batch_size=cfg.train.batch_size,
+				tau=cfg.train.tau,                # Target network update rate
+				gamma=cfg.train.discount,               # Discount factor
+				train_freq=cfg.train.train_freq,             # Update the model every train_freq steps
+				gradient_steps=cfg.train.utd,         # How many gradient steps to do at each update
+				action_noise=None,        # No additional action noise
+				optimize_memory_usage=False,
+				ent_coef="auto" if cfg.train.ent_coef == -1 else cfg.train.ent_coef,          # Automatic entropy tuning
+				target_update_interval=1, # Update target network every interval
+				target_entropy="auto" if cfg.train.target_ent == -1 else cfg.train.target_ent,    # Automatic target entropy
+				use_sde=False,
+				sde_sample_freq=-1,
+				tensorboard_log=cfg.logdir,
+				verbose=1,
+				policy_kwargs=policy_kwargs,
+			)
 	elif cfg.algorithm == 'dsrl_na':
-		model = DSRL(
-			"MlpPolicy",
-			env,
-			learning_rate=cfg.train.actor_lr,
-			buffer_size=10000000,      # Replay buffer size
-			learning_starts=1,    # How many steps before learning starts (total steps for all env combined)
-			batch_size=cfg.train.batch_size,
-			tau=cfg.train.tau,                # Target network update rate
-			gamma=cfg.train.discount,               # Discount factor
-			train_freq=cfg.train.train_freq,             # Update the model every train_freq steps
-			gradient_steps=cfg.train.utd,         # How many gradient steps to do at each update
-			action_noise=None,        # No additional action noise
-			optimize_memory_usage=False,
-			ent_coef="auto" if cfg.train.ent_coef == -1 else cfg.train.ent_coef,          # Automatic entropy tuning
-			target_update_interval=1, # Update target network every interval
-			target_entropy="auto" if cfg.train.target_ent == -1 else cfg.train.target_ent,    # Automatic target entropy
-			use_sde=False,
-			sde_sample_freq=-1,
-			tensorboard_log=cfg.logdir,
-			verbose=1,
-			policy_kwargs=policy_kwargs,
-			diffusion_policy=base_policy,
-			diffusion_act_dim=(cfg.act_steps, cfg.action_dim),
-			noise_critic_grad_steps=cfg.train.noise_critic_grad_steps,
-			critic_backup_combine_type=cfg.train.critic_backup_combine_type,
-		)
+		if getattr(cfg, "resume_path", ""):
+			model = DSRL.load(
+				cfg.resume_path, 
+				env=env, 
+				device=cfg.device, 
+				custom_objects={"diffusion_policy": base_policy},
+				diffusion_act_dim=(cfg.act_steps, cfg.action_dim),
+				noise_critic_grad_steps=cfg.train.noise_critic_grad_steps,
+				critic_backup_combine_type=cfg.train.critic_backup_combine_type,
+			)
+		else:
+			model = DSRL(
+				"MlpPolicy",
+				env,
+				learning_rate=cfg.train.actor_lr,
+				buffer_size=10000000,      # Replay buffer size
+				learning_starts=1,    # How many steps before learning starts (total steps for all env combined)
+				batch_size=cfg.train.batch_size,
+				tau=cfg.train.tau,                # Target network update rate
+				gamma=cfg.train.discount,               # Discount factor
+				train_freq=cfg.train.train_freq,             # Update the model every train_freq steps
+				gradient_steps=cfg.train.utd,         # How many gradient steps to do at each update
+				action_noise=None,        # No additional action noise
+				optimize_memory_usage=False,
+				ent_coef="auto" if cfg.train.ent_coef == -1 else cfg.train.ent_coef,          # Automatic entropy tuning
+				target_update_interval=1, # Update target network every interval
+				target_entropy="auto" if cfg.train.target_ent == -1 else cfg.train.target_ent,    # Automatic target entropy
+				use_sde=False,
+				sde_sample_freq=-1,
+				tensorboard_log=cfg.logdir,
+				verbose=1,
+				policy_kwargs=policy_kwargs,
+				diffusion_policy=base_policy,
+				diffusion_act_dim=(cfg.act_steps, cfg.action_dim),
+				noise_critic_grad_steps=cfg.train.noise_critic_grad_steps,
+				critic_backup_combine_type=cfg.train.critic_backup_combine_type,
+			)
 
 	checkpoint_callback = CheckpointCallback(
 		save_freq=cfg.save_model_interval, 
@@ -180,15 +194,18 @@ def main(cfg: OmegaConf):
 
 	if cfg.load_offline_data:
 		load_offline_data(model, cfg.offline_data_path, num_env)
-	if cfg.train.init_rollout_steps > 0:
+	if cfg.train.init_rollout_steps > 0 and not getattr(cfg, "resume_path", ""):
 		collect_rollouts(model, env, cfg.train.init_rollout_steps, base_policy, cfg)	
 		logging_callback.set_timesteps(cfg.train.init_rollout_steps * num_env)
+	elif getattr(cfg, "resume_path", ""):
+		logging_callback.set_timesteps(model.num_timesteps)
 
 	callbacks = [checkpoint_callback, logging_callback]
 	# Train the agent
 	model.learn(
 		total_timesteps=20000000,
-		callback = callbacks
+		callback = callbacks,
+		reset_num_timesteps=False if getattr(cfg, "resume_path", "") else True
 	)
 
 	# Save the final model

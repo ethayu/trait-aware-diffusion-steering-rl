@@ -151,18 +151,33 @@ class LoggingCallback(BaseCallback):
 		if self.eval_env is not None:
 			self.eval_env.env_method("set_traits", mask=mask)
 
-	def _maybe_advance_trait_phase(self, eval_reward):
+	def _maybe_advance_trait_phase(self, eval_reward=None):
 		if not self.trait_schedule:
 			return
 		phases = self.trait_schedule.get("phases", [])
 		if not phases or self._trait_phase_index >= len(phases) - 1:
 			return
 		min_steps = self.trait_schedule.get("min_steps", 0) # at least many steps to wait before advancing to the next phase
+		max_steps = self.trait_schedule.get("max_steps", float('inf')) # at most many steps to wait before forcing advancement to the next phase
 		patience = self.trait_schedule.get("patience", 0) # how many evals (episodes) without improvement to consider as convergence
 		min_delta = self.trait_schedule.get("min_delta", 0.0) # what counts as improvement (we want `patience` evals without improvement to consider as convergence)
 		phase_min_steps = phases[self._trait_phase_index].get("min_steps", min_steps)
-		if (self.total_timesteps - self._trait_phase_start) < phase_min_steps:
+		phase_max_steps = phases[self._trait_phase_index].get("max_steps", max_steps)
+		phase_duration = self.total_timesteps - self._trait_phase_start
+		if phase_duration < phase_min_steps:
 			return
+		if phase_duration >= phase_max_steps:
+			# Force advancement after max_steps
+			self._trait_phase_index += 1
+			self._trait_phase_start = self.total_timesteps
+			self._trait_best_eval = None
+			self._trait_plateau_count = 0
+			self._apply_current_trait_mask()
+			return
+
+		if eval_reward is None:
+			return
+
 		if self._trait_best_eval is None or eval_reward > (self._trait_best_eval + min_delta):
 			self._trait_best_eval = eval_reward
 			self._trait_plateau_count = 0
@@ -238,6 +253,10 @@ class LoggingCallback(BaseCallback):
 		self.episode_success[rew > -self.rew_offset] = 1
 		self.episode_completed[self.locals['dones']] = 1
 		self.total_timesteps += self.action_chunk * self.model.n_envs
+		
+		# Check for forced phase transition every step
+		self._maybe_advance_trait_phase(eval_reward=None)
+
 		if self.n_calls % self.log_freq == 0:
 			if len(self.episode_rewards) > 0:
 				if self.use_wandb:
@@ -462,15 +481,7 @@ class LoggingCallback(BaseCallback):
 			sweep_returns.append(float(avg_rew))
 		wandb.log({"eval/trait_sweep": table}, step=self.log_count)
 		if self.trait_logging_auto_plots:
-			if len(self.trait_names) == 2:
-				heatmap = wandb.plot.heatmap(
-					table,
-					self.trait_names[0],
-					self.trait_names[1],
-					"return",
-					title="eval/trait_sweep_heatmap",
-				)
-				wandb.log({"eval/trait_sweep_heatmap": heatmap}, step=self.log_count)
+			# Skip heatmap as wandb.plot.heatmap is deprecated/missing in many versions
 			for i, name in enumerate(self.trait_names):
 				by_value = {}
 				for vals, ret in zip(sweep_values, sweep_returns):

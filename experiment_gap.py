@@ -4,11 +4,11 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # configuration
-MODEL_PATH = "/home/asethi04/proj/diffusion-trait-steering/logs/gym-dsrl/gym_walker_dsrl_2025-12-24_02-55-54_1/2025-12-24_02-55-54_1/checkpoint/ft_policy_40000_steps.zip"
-GAP_TARGETS = [0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.10, 0.11, 0.12, 0.13, 0.14, 0.15, 0.16, 0.17, 0.18, 0.19, 0.20, 0.21]
-FIXED_SPEED = 1.0
+MODEL_PATH = "/home/asethi04/proj/diffusion-trait-steering/logs/gym-dsrl/gym_walker_dsrl_2025-12-24_04-48-08_1/2025-12-24_04-48-08_1/checkpoint/ft_policy_80000_steps.zip"
+GAP_TARGETS = [0.05, 0.06, 0.07, 0.08, 0.09, 0.10, 0.11, 0.12, 0.13, 0.14, 0.15, 0.16, 0.17, 0.18, 0.19, 0.20, 0.21, 0.22, 0.23, 0.24, 0.25]
+FIXED_SPEED = 1.5
 EPISODES = 5
-GPU = "5"
+GPU = "2"
 
 results = []
 
@@ -19,7 +19,7 @@ for gap in GAP_TARGETS:
         "--config-name=dsrl_walker.yaml",
         f"model_path={MODEL_PATH}",
         f"trait_values=[{gap}, {FIXED_SPEED}]",
-        "trait_mask=[1, 1]",
+        "trait_mask=[1, 0]",
         f"eval_episodes={EPISODES}",
         "deterministic_eval=True",
         "record_video=False"

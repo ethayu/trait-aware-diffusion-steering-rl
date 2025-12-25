@@ -26,6 +26,7 @@ deterministic_eval: False
 
 # Inference helpers
 model_path: ""
+resume_path: ""
 record_episodes: 10
 eval_episodes: 10
 record_video: false
@@ -40,8 +41,8 @@ traits:
   base_reward_fn: healthy_reward
   # Override at inference time with trait_values / trait_mask.
   schedule:
-    min_steps: 40000
-    max_steps: 100000
+    min_steps: 80000
+    max_steps: 105000
     patience: 3
     min_delta: 0.0
     phases:
@@ -61,7 +62,7 @@ traits:
   defs:
     - name: thigh_gap
       value_min: 0.05
-      value_max: 0.50
+      value_max: 0.15
       lambda: 10.0
     - name: speed_target
       value_min: 0.6
@@ -73,7 +74,7 @@ trait_mask: null
 
 eval_interval: 4000
 num_evals: 200
-save_model_interval: 10000
+save_model_interval: 2500
 save_replay_buffer: False
 
 env:

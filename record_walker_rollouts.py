@@ -103,7 +103,7 @@ def record_episodes(
     import imageio
 
     if output_dir is None:
-        output_dir = os.path.join(os.getcwd(), "videoswalker16000steps")
+        output_dir = os.path.join(os.getcwd(), "videoswalkertrainedgapsteps")
     os.makedirs(output_dir, exist_ok=True)
 
     # Choose which episodes to save: first N and last N
@@ -224,16 +224,17 @@ def main(cfg: OmegaConf):
     if algo == "dsrl_na" and getattr(model, "diffusion_policy", None) is None:
         model.diffusion_policy = base_policy
 
-    # where to place videos: by default inside the current Hydra run dir
-    output_dir = os.path.join(os.getcwd(), "videoswalker16000steps")
+    # where to place videos
+    output_dir = cfg.get("video_dir", os.path.join(os.getcwd(), "videoswalkertrainedgapsteps"))
     total_episodes = int(cfg.get("record_episodes", 10))
+    save_first_last = int(cfg.get("save_first_last", 2))
 
     record_episodes(
         model=model,
         vec_env=vec_env,
         cfg=cfg,
         total_episodes=total_episodes,
-        save_first_last=2,
+        save_first_last=save_first_last,
         output_dir=output_dir,
     )
 
