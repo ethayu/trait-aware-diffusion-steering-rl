@@ -1,78 +1,108 @@
-<div align="center">
+# Trait-Aware Diffusion Trait Steering (TADSRL)
+This repository is a research fork of DSRL that focuses on making a frozen diffusion policy steerable at test time by conditioning the noise policy on explicit traits. It keeps the diffusion policy fixed and learns a trait-aware noise policy with reward shaping.
 
-# Steering Your Diffusion Policy with Latent Space Reinforcement Learning (DSRL)
-
-## [[website](https://diffusion-steering.github.io)]      [[pdf](https://arxiv.org/pdf/2506.15799)]
-
-</div>
-
-
-<p align="center">
-  <a href="https://colinqiyangli.github.io/qc/">
-    <img alt="teaser figure" src="./assets/teaser.png" width="90%">
-  </a>
-</p>
-
-## Overview
-Diffusion steering via reinforcement learning (DSRL) is a lightweight and efficient method for RL finetuning of diffusion and flow policies. Rather than modifying the weights of the diffusion/flow policy, DSRL instead modifies the noise distribution sampled from to begin the denoising process.
-
-
-## Installation
-1. Clone repository
+Core idea:
 ```
-git clone --recurse-submodules git@github.com:ajwagen/dsrl.git
-cd dsrl
+r = base_reward + sum_i m_i * lambda_i * r_i(...)
 ```
-2. Create conda environment
+where `t` is a vector of trait values and `m` is a binary mask that turns traits on/off.
+
+## Setup
+1. Clone this repository
 ```
-conda create -n dsrl python=3.9 -y
-conda activate dsrl
+git clone --recurse-submodules <this-repo>
+cd diffusion-trait-steering
 ```
-3. Install our fork of DPPO 
+2. Create a conda environment
+```
+conda create -n tadsrl python=3.9 -y
+conda activate tadsrl
+```
+3. Install DPPO (diffusion policies)
 ```
 cd dppo
 pip install -e .
-pip install -e .[robomimic]
 pip install -e .[gym]
 cd ..
 ```
-4. Install our fork of Stable Baselines3
+4. Install Stable Baselines3 (DSRL implementation)
 ```
 cd stable-baselines3
 pip install -e .
 cd ..
 ```
-The diffusion policy checkpoints for the Robomimic and Gym experiments can be found [here](https://drive.google.com/drive/folders/1kzC49RRFOE7aTnJh_7OvJ1K5XaDmtuh1?usp=share_link). Download the contents of this folder and place in `./dppo/log`.
 
-## Running DSRL
-To run DSRL on Robomimic, call
+Download diffusion policy checkpoints for DSRL from the original project and place them in `./dppo/log`:
+https://drive.google.com/drive/folders/1kzC49RRFOE7aTnJh_7OvJ1K5XaDmtuh1
+
+## Trait-Aware Training (TADSRL)
+Traits and schedules live in `cfg/gym/dsrl_walker.yaml` under `traits`. Trait reward functions live in `traits.py`.
+
+Run Walker2d training:
 ```
-python train_dsrl.py --config-path=cfg/robomimic --config-name=dsrl_can.yaml
+python train_dsrl.py --config-path=cfg/gym --config-name=dsrl_walker.yaml
 ```
-where `dsrl_can.yaml` is set to the config file for the desired task. Similarly, for Gym, call
+
+### Define traits (Python)
+Each trait reward is a Python function that receives raw (unnormalized) observations:
 ```
-python train_dsrl.py --config-path=cfg/gym --config-name=dsrl_hopper.yaml
+def thigh_gap(raw_obs, info):
+    return reward, {"gap": gap}
 ```
-where `dsrl_hopper.yaml` is set to the config file for the desired task.
+Traits are registered by name in `traits.py`.
 
-## Applying DSRL to new settings
-It is straightforward to apply DSRL to new settings. Doing this typically requires:
-- Access to a diffusion or flow policy with the ability to control the noise initializing the denoising process. Note that if using a diffusion policy it must be sampled from with DDIM sampling.
--  In the case of `DSRL-NA`, the diffusion/flow policy is passed to the `SACDiffusionNoise` algorithm, and then this algorithm is simply run on a standard gym environment. 
-- In the case of `DSRL-SAC`, it is recommended that you write a wrapper around your environment which transforms the action space from the original action space to the noise space of the diffusion/noise policy. Here, the noise action given to the environment wrapper is then denoised through the diffusion policy, and this denoised action is played on the original environment, all of which is performed within the environment wrapper. See the `DiffusionPolicyEnvWrapper` in `env_utils.py` for an example of this. 
+### Base reward override (optional)
+You can replace the environment reward per step:
+```
+traits:
+  base_reward_fn: healthy_reward
+```
+Base reward functions also live in `traits.py`.
 
+### Phased mask training
+Train traits incrementally with a mask schedule:
+```
+traits:
+  schedule:
+    min_steps: 250000
+    patience: 3
+    min_delta: 0.0
+    phases:
+      - mask: [1, 0]
+      - mask: [0, 1]
+      - mask: [1, 1]
+```
 
+## Inference with Traits
+Use `run_inference.py` to set arbitrary trait values and masks at test time:
+```
+python run_inference.py --config-path=cfg/gym --config-name=dsrl_walker.yaml \
+  model_path=/abs/path/to/ft_policy_XXXX_steps.zip \
+  trait_values=[0.6,1.2] trait_mask=[1,1] eval_episodes=5
+```
 
-### Tips for hyperparameter tuning
-The following may be helpful in tuning DSRL on new settings:
-- Typically the key hyperparameters to tune are `action_magnitude` and `utd`. `action_magnitude` controls how large a noise value can be played in the noise action space, and `utd` is the number of gradient steps taken per update. Typically setting `action_magnitude` around 1.5 and `utd` around 20 performs effectively, but for best performance these should be tuned on new environments.
-- As described in the paper, there are two primary variants of the algorithm: `DSRL-NA` and `DSRL-SAC`. `DSRL-SAC` simply runs `SAC` with the action space the noise space of the diffusion policy, while `DSRL-NA` distills a Q-function learned on the original action space (see the paper for further details). In general `DSRL-NA` is more sample efficient and should be preferred to `DSRL-SAC`, however `DSRL-SAC` is somewhat more computationally efficient in settings where speed is critical.
-- DSRL typically performs best when using relatively large actor and critic networks. A reasonable value here is typically using a 3-layer MLP of width 2048. Tuning the size can sometimes lead to further gains. 
+To record videos:
+```
+python run_inference.py --config-path=cfg/gym --config-name=dsrl_walker.yaml \
+  model_path=/abs/path/to/ft_policy_XXXX_steps.zip \
+  record_video=true video_dir=videos_inference video_episodes=2
+```
+
+## Trait-Aware Logging (W&B)
+Logging is configured under `traits.logging` in `cfg/gym/dsrl_walker.yaml`. It includes:
+- Per-trait reward/value/mask statistics and shaping delta.
+- Action norm stats and correlation with traits.
+- Eval sweeps over trait values and cross-mask evals.
+- Auto-generated W&B plots (heatmap, elasticity, mask bar).
+
+## Notes
+- Trait values are sampled per episode. Mask phases control which traits are active.
+- `speed_ref` (for Walker2d speed trait) should be estimated from the frozen policy and set in `traits.py`.
 
 ## Acknowledgements
-Our implementation of DSRL is built on top of [Stable Baselines3](https://github.com/DLR-RM/stable-baselines3). For our diffusion policy implementation, we utilize the implementation given in the [DPPO](https://github.com/irom-princeton/dppo) codebase.
+This fork builds on [DSRL](https://diffusion-steering.github.io), [Stable Baselines3](https://github.com/DLR-RM/stable-baselines3), and [DPPO](https://github.com/irom-princeton/dppo).
 
-## Citation
+## Citation (DSRL)
 ```
 @article{wagenmaker2025steering,
   author    = {Wagenmaker, Andrew and Nakamoto, Mitsuhiko and Zhang, Yunchu and Park, Seohong and Yagoub, Waleed and Nagabandi, Anusha and Gupta, Abhishek and Levine, Sergey},
