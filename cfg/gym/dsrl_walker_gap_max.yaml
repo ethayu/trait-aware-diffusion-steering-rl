@@ -4,7 +4,7 @@ hydra:
   run:  
     dir: ${logdir}
 
-name: gym_walker_dsrl_${now:%Y-%m-%d}_${now:%H-%M-%S}_${seed}
+name: gym_walker_dsrl_gap_max_${now:%Y-%m-%d}_${now:%H-%M-%S}_${seed}
 logdir: ${log_dir}/gym-dsrl/${name}/${now:%Y-%m-%d}_${now:%H-%M-%S}_${seed}
 base_policy_path: ./dppo/log/gym-pretrain/walker2d-medium-v2_pre_diffusion_mlp_ta4_td20/2024-06-12_23-06-12/checkpoint/state_3000.pt
 normalization_path: ./dppo/log/gym/${env_name}/normalization.npz
@@ -26,7 +26,7 @@ deterministic_eval: False
 
 # Inference helpers
 model_path: ""
-resume_path: ""
+resume_path: "/home/asethi04/proj/diffusion-trait-steering/logs/gym-dsrl/gym_walker_dsrl_gap_max_2025-12-25_00-45-51_1/2025-12-25_00-45-51_1/checkpoint/ft_policy_76000_steps.zip"
 record_episodes: 10
 save_first_last: 2
 eval_episodes: 10
@@ -42,13 +42,12 @@ traits:
   base_reward_fn: healthy_reward
   # Override at inference time with trait_values / trait_mask.
   schedule:
-    min_steps: 80000
-    max_steps: 105000
+    min_steps: 40000
+    max_steps: 100000
     patience: 3
     min_delta: 0.0
     phases:
-      - mask: [1, 0]
-      - mask: [0, 1]
+      - mask: [1, 1] # Focus on both thigh gap and speed
   logging:
     enabled: true
     auto_plots: true
@@ -61,21 +60,21 @@ traits:
     cross_mask_episodes: 2
     cross_mask_deterministic: true
   defs:
-    - name: thigh_gap
-      value_min: 0.05
-      value_max: 0.15
-      lambda: 10.0
-    - name: speed_target
-      value_min: 0.6
-      value_max: 2.1
-      lambda: 2.0
+    - name: thigh_gap_max
+      value_min: 1.0
+      value_max: 1.0
+      lambda: 250.0 # High lambda for thigh gap
+    - name: speed_max
+      value_min: 1.0
+      value_max: 1.0
+      lambda: 1.0 # Give some weight to speed now
 
 trait_values: null
-trait_mask: null
+trait_mask: [1, 1]
 
 eval_interval: 4000
 num_evals: 200
-save_model_interval: 2500
+save_model_interval: 500
 save_replay_buffer: False
 
 env:
@@ -99,7 +98,7 @@ env:
 wandb:
   project: dsrl
   run: ${now:%H-%M-%S}_${name}
-  group: gym_walker
+  group: gym_walker_gap_max
 
 train:
   tau: 0.005 # Target update rate
@@ -142,3 +141,4 @@ model:
   denoising_steps: 20
   device: ${device}
   controllable_noise: True
+

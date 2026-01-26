@@ -76,4 +76,15 @@ diffusion-trait-steering/dppo/log/gym-pretrain/hopper-medium-v2_pre_diffusion_ml
 
 CUDA_VISIBLE_DEVICES=2 python train_dsrl.py --config-path=cfg/gym --config-name=dsrl_walker.yaml
 
+CUDA_VISIBLE_DEVICES=2 python train_dsrl.py --config-path=cfg/gym --config-name=dsrl_walker_stride_v3.yaml
+
 CUDA_VISIBLE_DEVICES=2 python record_walker_rollouts.py   model_path=/home/asethi04/proj/diffusion-trait-steering/logs/gym-dsrl/gym_walker_dsrl_2025-12-24_04-48-08_1/2025-12-24_04-48-08_1/checkpoint/ft_policy_80000_steps.zip   record_episodes=4
+
+
+CUDA_VISIBLE_DEVICES=4 python record_walker_gap_max.py record_episodes=4 video_dir=jan112026 save_first_last=2 model_path=/home/asethi04/proj/diffusion-trait-steering/logs/gym-dsrl/gym_walker_dsrl_gap_max_2026-01-11_22-38-17_1/2026-01-11_22-38-17_1/checkpoint/ft_policy_120000_steps.zip 
+
+CUDA_VISIBLE_DEVICES=4 python record_walker_stride_v3.py \
+    model_path=/home/asethi04/proj/diffusion-trait-steering/logs/gym-dsrl/gym_walker_dsrl_stride_v3_2026-01-13_20-01-41_1/2026-01-13_20-01-41_1/checkpoint/ft_policy_8000_steps.zip\
+    record_episodes=4 \
+    video_dir=nomins8k
+

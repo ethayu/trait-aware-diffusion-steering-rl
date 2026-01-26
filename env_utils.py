@@ -30,6 +30,32 @@ def denormalize_obs(
 	return np.asarray(raw_obs, dtype=np.float32)
 
 
+def get_geom_id(model, name: str):
+	"""
+	Robustly find a geom ID by name across different MuJoCo bindings.
+	"""
+	# mujoco-py (PyMjModel)
+	if hasattr(model, "geom_name2id"):
+		try:
+			return model.geom_name2id(name)
+		except Exception:
+			return None
+
+	# native mujoco (mujoco.MjModel): model.geom('name').id is supported
+	if hasattr(model, "geom"):
+		try:
+			return model.geom(name).id
+		except Exception:
+			pass
+
+	# fallback to C-API lookup
+	try:
+		import mujoco
+		return mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, name)
+	except Exception:
+		return None
+
+
 def make_robomimic_env(render=False, env='square', normalization_path=None, low_dim_keys=None, dppo_path=None):
 	wrappers = OmegaConf.create({
 		'robomimic_lowdim': {
@@ -189,6 +215,14 @@ class TraitWrapperGym(gym.Env):
 		self.prev_raw_obs = None
 		self.base_reward_fn = None
 
+		# NEW: Stateful tracking for touchdown stride length
+		self.prev_contact_r = False
+		self.prev_contact_l = False
+		self.last_td_x_r = None
+		self.last_td_x_l = None
+		self.ready_for_r = True
+		self.ready_for_l = True
+
 		self.trait_slices = []
 		start = 0
 		for dim in self.trait_dims:
@@ -212,6 +246,32 @@ class TraitWrapperGym(gym.Env):
 		low = np.concatenate([env_low, trait_low, mask_low], axis=0)
 		high = np.concatenate([env_high, trait_high, mask_high], axis=0)
 		self.observation_space = spaces.Box(low=low, high=high, dtype=np.float32)
+
+		# Robust geom discovery
+		self.floor_id = None
+		self.foot_r_id = None
+		self.foot_l_id = None
+		try:
+			unwrapped = env.unwrapped
+			model = None
+			if hasattr(unwrapped, "sim"): # mujoco-py
+				model = unwrapped.sim.model
+			elif hasattr(unwrapped, "model"): # native bindings
+				model = unwrapped.model
+
+			if model is not None:
+				# Use exact names for geom discovery
+				self.floor_id  = get_geom_id(model, "floor")
+				self.foot_r_id = get_geom_id(model, "foot_geom")
+				self.foot_l_id = get_geom_id(model, "foot_left_geom")
+
+				if self.floor_id is None or self.foot_r_id is None or self.foot_l_id is None:
+					raise RuntimeError(
+						f"Geom IDs not found: floor={self.floor_id}, foot_r={self.foot_r_id}, foot_l={self.foot_l_id}"
+					)
+		except Exception as e:
+			print(f"[TraitWrapperGym] Error: Geom discovery failed: {e}")
+			raise e
 
 	def _trait_bounds_for_def(self, trait_def):
 		v_min = trait_def.get("value_min", -1.0)
@@ -274,10 +334,26 @@ class TraitWrapperGym(gym.Env):
 
 	def set_traits(self, values=None, mask=None):
 		if values is not None:
-			self.override_values = np.asarray(values, dtype=np.float32).reshape(-1)
+			values = np.asarray(values, dtype=np.float32).reshape(-1)
+			if values.shape[0] < self.total_trait_dim:
+				# Pad with zeros if too short
+				new_values = np.zeros(self.total_trait_dim, dtype=np.float32)
+				new_values[:values.shape[0]] = values
+				values = new_values
+			elif values.shape[0] > self.total_trait_dim:
+				values = values[:self.total_trait_dim]
+			self.override_values = values
 			self.current_traits = self.override_values.copy()
 		if mask is not None:
-			self.override_mask = np.asarray(mask, dtype=np.float32).reshape(-1)
+			mask = np.asarray(mask, dtype=np.float32).reshape(-1)
+			if mask.shape[0] < self.n_traits:
+				# Pad with ones (on by default) if too short
+				new_mask = np.ones(self.n_traits, dtype=np.float32)
+				new_mask[:mask.shape[0]] = mask
+				mask = new_mask
+			elif mask.shape[0] > self.n_traits:
+				mask = mask[:self.n_traits]
+			self.override_mask = mask
 			self.current_mask = self.override_mask.copy()
 
 	def clear_traits(self):
@@ -330,14 +406,126 @@ class TraitWrapperGym(gym.Env):
 		self._ensure_traits(resample=self.resample_on_reset or self.current_traits is None)
 		raw_obs = denormalize_obs(norm_obs, self.obs_min, self.obs_max)
 		self.prev_raw_obs = raw_obs
+		
+		# Initialize state for alternating steps
+		try:
+			unwrapped = self.env.unwrapped
+			data = None
+			if hasattr(unwrapped, "sim"): data = unwrapped.sim.data
+			elif hasattr(unwrapped, "data"): data = unwrapped.data
+			if data is not None and self.foot_r_id is not None:
+				self.last_td_x_r = float(data.geom_xpos[self.foot_r_id][0])
+				self.last_td_x_l = float(data.geom_xpos[self.foot_l_id][0])
+		except:
+			pass
+		self.ready_for_r = True
+		self.ready_for_l = True
+		self.prev_contact_r = False
+		self.prev_contact_l = False
+
 		obs = self._augment_obs(norm_obs)
 		return obs
 
 	def step(self, action):
-		norm_obs, reward, done, info = self.env.step(action)
+		step_result = self.env.step(action)
+		# Handle both gymnasium (5 values) and gym (4 values) return signatures
+		if len(step_result) == 5:
+			norm_obs, reward, terminated, truncated, info = step_result
+			done = terminated or truncated
+		else:
+			norm_obs, reward, done, info = step_result
+			terminated = done
+			truncated = False
 		self._ensure_traits(resample=False)
 		raw_obs = denormalize_obs(norm_obs, self.obs_min, self.obs_max)
 		env_reward = float(reward)
+
+		# Physics-based event tracking
+		try:
+			unwrapped = self.env.unwrapped
+			data = None
+			if hasattr(unwrapped, "sim"): data = unwrapped.sim.data # mujoco-py
+			elif hasattr(unwrapped, "data"): data = unwrapped.data # native
+
+			if data is not None and self.floor_id is not None and self.foot_r_id is not None and self.foot_l_id is not None:
+				# 1. Detect Contacts
+				contact_r = False
+				contact_l = False
+				for i in range(data.ncon):
+					c = data.contact[i]
+					if (c.geom1 == self.floor_id and c.geom2 == self.foot_r_id) or \
+					   (c.geom2 == self.floor_id and c.geom1 == self.foot_r_id):
+						contact_r = True
+					if (c.geom1 == self.floor_id and c.geom2 == self.foot_l_id) or \
+					   (c.geom2 == self.floor_id and c.geom1 == self.foot_l_id):
+						contact_l = True
+				
+				# 2. Get Absolute Positions for Reach calculation
+				# data.qpos[0] is typically absolute x for Walker2d
+				pelvis_x = float(data.qpos[0])
+				x_r = data.geom_xpos[self.foot_r_id][0]
+				x_l = data.geom_xpos[self.foot_l_id][0]
+				
+				# 3. Detect Touchdown Events
+				td_r = contact_r and (not self.prev_contact_r)
+				td_l = contact_l and (not self.prev_contact_l)
+				
+				stride_r = 0.0
+				stride_l = 0.0
+				step_sep_r = 0.0
+				step_sep_l = 0.0
+				reach_r = 0.0
+				reach_l = 0.0
+
+				if td_r:
+					# Progress relative to OTHER foot's last touchdown
+					if self.ready_for_r and self.last_td_x_l is not None:
+						if x_r > self.last_td_x_l:
+							stride_r = x_r - self.last_td_x_l
+							self.ready_for_r = False
+							self.ready_for_l = True
+					self.last_td_x_r = x_r
+					step_sep_r = x_r - x_l # distance from stationary foot
+					reach_r = x_r - pelvis_x
+
+				if td_l:
+					# Progress relative to OTHER foot's last touchdown
+					if self.ready_for_l and self.last_td_x_r is not None:
+						if x_l > self.last_td_x_r:
+							stride_l = x_l - self.last_td_x_r
+							self.ready_for_l = False
+							self.ready_for_r = True
+					self.last_td_x_l = x_l
+					step_sep_l = x_l - x_r # distance from stationary foot
+					reach_l = x_l - pelvis_x
+
+				# 4. Update Info for traits
+				info.update({
+					"flight": not contact_r and not contact_l,
+					"pelvis_x": pelvis_x,
+					"foot_x_r": x_r,
+					"foot_x_l": x_l,
+					"foot_sep": abs(x_r - x_l),
+					"td_r": td_r, "td_l": td_l,
+					"stride_r": stride_r, "stride_l": stride_l,
+					"step_sep_r": step_sep_r, "step_sep_l": step_sep_l,
+					"reach_r": reach_r, "reach_l": reach_l,
+					"physics_ok": 1.0
+				})
+
+				# 5. Update state for next step
+				self.prev_contact_r = contact_r
+				self.prev_contact_l = contact_l
+			else:
+				# Physics data not available - set defaults
+				info["flight"] = None
+				info["physics_ok"] = 0.0
+
+		except Exception as e:
+			# On any error, mark physics as unavailable
+			info["flight"] = None
+			info["physics_ok"] = 0.0
+
 		if self.base_reward_fn is not None:
 			base_info = {
 				"prev_raw_obs": self.prev_raw_obs,
@@ -377,7 +565,7 @@ class TraitWrapperGym(gym.Env):
 			info["prev_raw_obs"] = self.prev_raw_obs.copy()
 		info.update(trait_metrics)
 		self.prev_raw_obs = raw_obs
-		return obs, shaped_reward, done, info
+		return obs, shaped_reward, terminated, truncated, info
 
 	def render(self, mode="human", **kwargs):
 		if hasattr(self.env, "render"):
@@ -408,25 +596,74 @@ class ActionChunkWrapper(gymnasium.Env):
 			action = action.reshape(self.act_steps, -1)
 		obs_ = []
 		reward_ = []
-		done_ = []
+		terminated_ = []
+		truncated_ = []
 		info_ = []
 		done_i = False
 		for i in range(action.shape[0]):
 			self.count += 1
-			obs_i, reward_i, done_i, info_i = self.env.step(action[i])
+			step_result = self.env.step(action[i])
+			# Handle both gymnasium (5 values) and gym (4 values) return signatures
+			if len(step_result) == 5:
+				obs_i, reward_i, terminated_i, truncated_i, info_i = step_result
+			else:
+				obs_i, reward_i, done_i, info_i = step_result
+				terminated_i = done_i
+				truncated_i = False
 			obs_.append(obs_i)
 			reward_.append(reward_i)
-			done_.append(done_i)
+			terminated_.append(terminated_i)
+			truncated_.append(truncated_i)
 			info_.append(info_i)
+			if terminated_i or truncated_i:
+				break
 		obs = obs_[-1]
 		reward = sum(reward_)
-		done = np.max(done_)
-		info = info_[-1]
+		terminated = np.any(terminated_)
+		truncated = np.any(truncated_)
+		
+		# Aggregate info across the chunk so we don't drop touchdown events and logging data
+		info = dict(info_[-1])
+		info["flight"] = any(ii.get("flight", False) for ii in info_)
+		info["td_r"] = any(ii.get("td_r", False) for ii in info_)
+		info["td_l"] = any(ii.get("td_l", False) for ii in info_)
+		
+		# Collect lists of all touchdown events in the chunk for precise evaluation
+		info["strides_r"] = [ii.get("stride_r", 0.0) for ii in info_ if ii.get("td_r", False)]
+		info["strides_l"] = [ii.get("stride_l", 0.0) for ii in info_ if ii.get("td_l", False)]
+		info["seps_r"] = [ii.get("step_sep_r", 0.0) for ii in info_ if ii.get("td_r", False)]
+		info["seps_l"] = [ii.get("step_sep_l", 0.0) for ii in info_ if ii.get("td_l", False)]
+		info["reaches_r"] = [ii.get("reach_r", 0.0) for ii in info_ if ii.get("td_r", False)]
+		info["reaches_l"] = [ii.get("reach_l", 0.0) for ii in info_ if ii.get("td_l", False)]
+
+		# Keep sums for logging/debugging
+		info["stride_r_sum"] = sum(float(ii.get("stride_r", 0.0)) for ii in info_)
+		info["stride_l_sum"] = sum(float(ii.get("stride_l", 0.0)) for ii in info_)
+
+		# Raw, pre-threshold diagnostics for debugging zero rewards
+		info["trait_diag_td_count_r"] = float(sum(1 for ii in info_ if ii.get("td_r", False)))
+		info["trait_diag_td_count_l"] = float(sum(1 for ii in info_ if ii.get("td_l", False)))
+		all_strides = info["strides_r"] + info["strides_l"]
+		all_reaches = info["reaches_r"] + info["reaches_l"]
+		all_seps = info["seps_r"] + info["seps_l"]
+		info["trait_diag_stride_raw_max"] = float(max(all_strides) if all_strides else 0.0)
+		info["trait_diag_reach_raw_max"] = float(max(all_reaches) if all_reaches else 0.0)
+		info["trait_diag_sep_raw_max"] = float(max(all_seps) if all_seps else 0.0)
+		
+		# Aggregate trait rewards and metrics for logging
+		if "trait_rewards" in info_[-1]:
+			# Sum up trait rewards across substeps
+			info["trait_rewards"] = [sum(ii["trait_rewards"][j] for ii in info_) for j in range(len(info_[-1]["trait_rewards"]))]
+		
+		# For metrics, we can take the last or max/mean depending on the metric, 
+		# but for simplicity we'll keep the last ones and just ensure events are captured
+		info["physics_ok"] = any(ii.get("physics_ok", 0.0) > 0 for ii in info_)
+
 		if self.count >= self.max_episode_steps:
-			done = True
-		if done:
+			truncated = True
+		if terminated or truncated:
 			info['terminal_observation'] = obs
-		return obs, reward, done, False, info
+		return obs, reward, terminated, truncated, info
 
 	def render(self, mode="human", **kwargs):
 		return self.env.render(mode=mode, **kwargs)
